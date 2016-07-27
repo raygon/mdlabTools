@@ -1,1 +1,0 @@
-import scaled_image
