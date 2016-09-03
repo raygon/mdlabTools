@@ -4,7 +4,22 @@ import os
 import socket
 from sys import platform as _platform
 
-def get_config(config_data, strict=True, verbose=True):
+
+def freeze_config(config, verbose=True):
+  if len(config.keys()) > 1:
+    raise ValueError('can only freeze single config dicts, found %s' % len(config))
+  frozen_config = config
+  for k in frozen_config:
+    # print(frozen_config[k])
+    for kk, vv in frozen_config[k].items():
+      if hasattr(vv, '__call__'):
+        frozen_config[k][kk] = vv()
+  if verbose:
+      print('froze config: %s%s%s' % (Fore.BLUE, next (iter (frozen_config.keys())), Style.RESET_ALL))
+  return frozen_config
+
+
+def get_config(config_data, freeze=True, strict=True, verbose=True):
   """
     Provides constants and evironment variables based on the outcome of associated
     tests.
@@ -18,6 +33,8 @@ def get_config(config_data, strict=True, verbose=True):
         be used. Note, each configuration test must be mutually exclusive so that
         there is, at most, one possible valid configuration. If multiple valid
         configurations will throw a ValueError (see "strict" argument).
+      freeze (bool): If True, will iterate over all dictionary items and replace
+        the value of any functions with their returned output.
       strict (bool): If True, will throw an error if more than one valid configuration
         setting is found. If False, will return all valid configurations.
       verbose (bool): If True, display verbose output.
@@ -38,6 +55,10 @@ def get_config(config_data, strict=True, verbose=True):
     raise ValueError('Multiple valid configurations found. Use "strict" argument to ignore.')
   elif verbose:
     print('using config settings: %s%s%s' % (Fore.BLUE, next (iter (valid_config.keys())), Style.RESET_ALL))
+
+  if freeze:
+    valid_config = freeze_config(valid_config, verbose=verbose)
+
   return valid_config
 
 
@@ -67,7 +88,8 @@ def is_openmind():
     Returns:
       (bool): True or False, indicates if process is being run on openmind.
   """
-  return socket.gethostname() == 'openmind7.mit.edu'
+  # return socket.gethostname() == 'openmind7.mit.edu'
+  return socket.gethostname() == 'openmind7'
 
 
 def is_slurm_openmind():
@@ -80,7 +102,7 @@ def is_slurm_openmind():
       (bool): True or False, indicates if process is being run through SLURM on
       openmind.
   """
-  raise NotImplementedError()
+  return os.getenv('SLURM_CLUSTER_NAME') is not None and os.getenv('SLURM_CLUSTER_NAME') == 'openmind7'
 
 
 def is_mindhive():
