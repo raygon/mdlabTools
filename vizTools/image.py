@@ -1,35 +1,47 @@
-"""
-Simple matrix intensity plot, similar to MATLAB imagesc()
-David Andrzejewski (david.andrzej@gmail.com)
-"""
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker
 import matplotlib.cm as cm
 
 
-def tile_image_batch(img_array, h_tiles, w_tiles=None, pad=2):
+def tile_image_batch(img_array, h_tiles, w_tiles=None, pad=2, batch_rep='tf'):
   if w_tiles is None:
     w_tiles = h_tiles
 
-  print('img shape:', img_array.shape)
+  # print('img shape:', img_array.shape)
   pad = 2
   # disp = out_layer2[:, :, :, :w_tiles * h_tiles]
   # print(disp.shape)
   # plt.imshow(disp[0,:,:,-1])
   # plt.show()
-  oc, oh, ow, ofr = img_array.shape
-  ofr = w_tiles * h_tiles
+  if batch_rep.lower() == 'tf':
+    ofr, oh, ow, oc = img_array.shape
+  elif batch_rep.lower() == 'np' or batch_rep.lower() == 'numpy':
+    oh, ow, oc, ofr = img_array.shape
+  elif batch_rep.lower() == 'torch':
+    oc, oh, ow, ofr = img_array.shape
+  else:
+    raise ValueError('unrecognized batch_rep argument: %s' % batch_rep)
+
+  # ofr = w_tiles * h_tiles
   disp = np.zeros(((oh+pad)*h_tiles-pad, (ow+pad)*w_tiles-pad), dtype=img_array.dtype)
   print('disp', disp.shape)
   im_ctr = 0
   for iw in range(w_tiles):
     for ih in range(h_tiles):
+      if im_ctr >= ofr:
+        return disp
+      # print(im_ctr, ofr)
       # print(disp[:, :, im_ctr].shape)
       # print(im_ctr, iw*ow, (iw+1)*ow)
-      print(im_ctr, iw*(ow+pad), (iw+1)*ow)
+      # print(im_ctr, iw*(ow+pad), (iw+1)*ow)
       # disp[ih*(oh+pad):(ih+1)*(oh+pad), iw*(ow+pad):(iw+1)*(ow+pad)] = img_array[0, :, :, im_ctr]
-      disp[ih*(oh+pad):(ih+1)*oh+ih*pad, iw*(ow+pad):(iw+1)*ow+iw*pad] = img_array[0, :, :, im_ctr]
+      if batch_rep.lower() == 'tf':
+        disp[ih*(oh+pad):(ih+1)*oh+ih*pad, iw*(ow+pad):(iw+1)*ow+iw*pad] = img_array[im_ctr, :, :, 0]
+      if batch_rep.lower() == 'np' or batch_rep.lower() == 'numpy':
+        disp[ih*(oh+pad):(ih+1)*oh+ih*pad, iw*(ow+pad):(iw+1)*ow+iw*pad] = img_array[:, :, 0, im_ctr]
+      if batch_rep.lower() == 'torch':
+        disp[ih*(oh+pad):(ih+1)*oh+ih*pad, iw*(ow+pad):(iw+1)*ow+iw*pad] = img_array[0, :, :, im_ctr]
       # disp[ih*oh:(ih+1)*oh, iw*ow+(iw+1)*pad:(iw+1)*ow+(iw+1)*pad] = img_array[0, :, :, im_ctr]
       # disp[ih*oh:(ih+1)*oh, iw*ow:(iw+1)*ow] = img_array[0, :, :, im_ctr]
       im_ctr += 1
