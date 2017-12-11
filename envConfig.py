@@ -1,21 +1,25 @@
-from colorama import Fore, Back, Style
 import getpass
 import os
 import socket
 from sys import platform as _platform
+from mdlab.utilfx import cprint, cpprint, colored
 
 
 def freeze_config(config, verbose=True):
+  """Freeze the dictionary by converting functions to serializable types.
+  """
   if len(config.keys()) > 1:
     raise ValueError('can only freeze single config dicts, found %s' % len(config))
   frozen_config = config
+
   for k in frozen_config:
     # print(frozen_config[k])
     for kk, vv in frozen_config[k].items():
       if hasattr(vv, '__call__'):
         frozen_config[k][kk] = vv()
   if verbose:
-      print('froze config: %s%s%s' % (Fore.BLUE, next (iter (frozen_config.keys())), Style.RESET_ALL))
+      # print('froze config: %s%s%s' % (Fore.BLUE, next (iter (frozen_config.keys())), Style.RESET_ALL))
+      print('froze config: %s' % colored(list(frozen_config)[0], 'cyan'))
   return frozen_config
 
 
@@ -54,8 +58,8 @@ def get_config(config_data, freeze=True, strict=True, verbose=True):
   if len(valid_config.keys()) > 1 and strict:
     raise ValueError('Multiple valid configurations found. Use "strict" argument to ignore.')
   elif verbose:
-    print('using config settings: %s%s%s' % (Fore.BLUE, next (iter (valid_config.keys())), Style.RESET_ALL))
-
+    # print('using config settings: %s%s%s' % (Fore.BLUE, next (iter (valid_config.keys())), Style.RESET_ALL))
+    print('using config settings: %s' % colored(list(valid_config)[0], 'cyan'))
   if freeze:
     valid_config = freeze_config(valid_config, verbose=verbose)
 
@@ -79,14 +83,29 @@ def get_om_config(local_config, om_config, slurm_config=None):
 
 
 def is_openmind():
-  """ Check to see if process is being run on openmind. CAUTION: processes running
-  through a SLURM scheduler are considered different and require a different check.
+  """ Check to see if process is being run on openmind, either as a SLURM
+  job or on the headnode.
 
     Args:
       None
 
     Returns:
       (bool): True or False, indicates if process is being run on openmind.
+  """
+  return is_openmind_headnode() or is_slurm_openmind() or is_ranvier()
+
+
+def is_openmind_headnode():
+  """ Check to see if process is being run on openmind headnode. CAUTION:
+  processes running through a SLURM scheduler are considered different and
+  require a different check.
+
+    Args:
+      None
+
+    Returns:
+      (bool): True or False, indicates if process is being run on the openmind
+      headnode.
   """
   # return socket.gethostname() == 'openmind7.mit.edu'
   return socket.gethostname() == 'openmind7'
@@ -103,6 +122,10 @@ def is_slurm_openmind():
       openmind.
   """
   return os.getenv('SLURM_CLUSTER_NAME') is not None and os.getenv('SLURM_CLUSTER_NAME') == 'openmind7'
+
+
+def is_ranvier():
+  return os.environ.get('HOSTNAME') == 'ranvier'
 
 
 def is_mindhive():
