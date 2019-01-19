@@ -1,19 +1,289 @@
+"""Assorted tools and helpful functions for general work in Python.
+This module is intended to contain general purpose routines; any
+domain-specific tools (e.g., working with audio) should be grouped into
+a separate module.
+"""
 import pprint
 import os
 import sys
 import numpy as np
 import pickle
 from itertools import zip_longest
+import datetime
 from time import strftime, gmtime
 from operator import itemgetter as i
 from functools import cmp_to_key
 from warnings import warn
 from termcolor import colored, cprint
 from functools import reduce
+import importlib
+from pandas import notnull as pd_notnull
+from hashlib import sha1
+from base64 import b32encode
+import json
 
 # import ipdb
+import pdb as ipdb
 import pprint
 ppr = pprint.PrettyPrinter()
+
+
+# def iimport(module_str_list, strict=True):
+#   for m in module_str_list:
+#     try:
+#       importlib.import_module(m)
+#     except Exception as e:
+#       if strict:
+#         raise e
+#       else:
+#         warn(e)
+
+def urlsafe_b32encode(s):
+  b32_str = b32encode(s)
+  return b32_str.decode().replace('=', '-')
+  # return b32_str.replace(b'=', b'-')
+
+
+def hash_if_too_long(s, max_len=255):
+  out_s = hash_str(s) if len(s) > max_len else s
+  return out_s
+
+
+def hash_str(x):
+  bin_digest = sha1(repr(x).encode()).digest()
+  b32_digest = urlsafe_b32encode(bin_digest)
+  return b32_digest
+
+
+def hash_json_dict(d, exclude_keys={}, **kwargs):
+  _d = {k: v for k, v in d.items() if k not in exclude_keys}
+  # ppr.pprint(_d)
+  _kwargs = {'sort_keys': True, 'ensure_ascii': True, 'indent': 2, 'separators': (',', ':')}
+  _kwargs.update(kwargs)
+  d_json = json.dumps(_d, **_kwargs)
+  return hash_str(d_json)
+
+
+def wrapped_write(write_fx, verbose=1):
+  def _fx(wfn, *args, **kwargs):
+    touch_dir(os.path.dirname(wfn))
+    out = write_fx(wfn, *args, **kwargs)
+    if verbose:
+      print('wrapped_write to --> %s' % wfn)
+    return wfn, out
+  return _fx
+
+
+def num_to_kstr(num):
+  """Convert a number to a string in Nk represenation (eg, '48k') if the
+  number is at least 1000k
+  """
+  return str(num) if num < 1000 else '%sk' % (num // 1000)
+
+
+def reduce_to_unique(array, axis=0, remove_nans=True):
+  """A naive way to reduce the array values to the set of unique
+  values, similar to np.unique but attempts to preserve the shape of
+  the array and handle nans.
+
+  Args:
+    array (array-like): Description
+    remove_nans (bool):
+  """
+  if axis != 0:
+    raise NotImplementedError()
+
+  try:
+    # look for a completely valid entry
+    valid_str = 'non-nan'
+    reduced_list = np.unique([x for x in array if np.all(pd_notnull(x))], axis=axis)
+  except Exception as e:
+    # look for a partially valid entry (some nans, but not all)
+    valid_str = 'some-nan'
+    reduced_list = [x for x in array if np.any(pd_notnull(x))]
+    if reduced_list:
+      ref_val = reduced_list[0]
+      reduced_list = [x for x in reduced_list if not np.allclose(x, ref_val, equal_nan=True)]
+    else:
+      valid_str = 'all-nan'
+      reduced_list = [array[0],]
+
+  # print(valid_str, reduced_list)
+
+  return reduced_list
+
+
+  # reduced_list = []
+  # reference_val = None
+  # for i, val in enumerate(array):
+  #   if reference_val is None:
+  #     if np.any(pd_notnull(val)):
+  #       reference_val = val
+  #   else:
+  #     is_equal = _compare_fx(val, reference_val)
+
+
+  # def _compare_fx(val, ref):
+  #   if remove_nans and np.any(np.isnan(val)):
+  #     out = np.nan
+  #   else:
+  #     out = np.all(ref == val)
+  #   return out
+
+  # reduced_list = []
+  # reference_val = None
+  # for i, val in enumerate(array):
+  #   if reference_val is None:
+  #     if remove_nans and np.all(pd_notnull(val)):
+  #       reference_val = val
+
+  #   if reference_val is not None:
+  #     is_equal = _compare_fx(val, reference_val)
+
+
+def join_iter(iterable, delimiter='_', strict=False):
+  if strict and iterable is None:
+    return None
+  else:
+    out = delimiter.join(map(str, iterable))
+    return out if out else None
+
+
+def compute_max_segments(signal_length, duration, padding=0):
+  """Compute the maximum number of continuous segments
+  that can be made from the inputs with specified params.
+  """
+  total_seg_len = 2 * padding + duration
+  return signal_length - total_seg_len + 1
+
+
+def compute_max_chunks(signal_length, duration, padding=0):
+  """Maximum number of non-overlapping chunks that can be
+  snipped from the signal of a given length.
+  """
+  total_seg_len = 2 * padding + duration
+  return signal_length // total_seg_len
+
+
+def extract_center_window(x, window_len, strict=True):
+  if strict and window_len > len(x):
+    raise ValueError('window_len is greater than x; ignore with strict=False')
+  # start = int(len(x) / 2 - window_len // 2)  # prefer right edge
+  start = int(len(x) / 2 - window_len / 2)  # prefer left edge
+  stop = start + window_len
+  x = x[start:stop]
+  # print('[%s, %s] --> %s' % (start, stop, len(x)))
+  return x
+
+
+def extract_random_window(a, width, start=None, stop=None, seed=None, verbose=1, return_inds=False):
+  if len(a) == width:
+    out = a
+    start_ind, stop_ind = 0, width - 1
+  else:
+    start = 0 if start is None else start
+    stop = len(a) - width if stop is None else stop
+    np.random.seed(seed)
+
+    start_ind = np.random.randint(start, stop)
+    stop_ind = start_ind + width
+    out = a[start_ind:stop_ind]
+
+    if verbose > 0:
+      print('[%s, %s] %s --> [%s, %s]' % (start, stop, out.shape, start_ind, stop_ind))
+
+  if return_inds:
+    out = (out, [start_ind, stop_ind])
+  return out
+
+
+def extract_windows_uneven(a, inner, pad_left=0, pad_right=None, auto_cast=True, ret_inds=True):
+  """Excise windows from the array.
+
+  Args:
+    a (array-like): Array to slice up.
+    width (int): Width of outer window without padding.
+    stride (int, None, optional): Width of inner window steps.
+    padding (int, optional): Amount of padding to apply to each side of the
+      inner window, this is probably to allow skipping samples.
+    auto_cast (bool, optional): If True, will coerce all arguments to the
+      appropriate types.
+
+  Returns:
+    np.array: extracted windows
+  """
+  pad_right = pad_left if pad_right is None else pad_right
+
+  if auto_cast:
+    inner = int(inner)
+    pad_left = int(pad_left)
+    pad_right = int(pad_right)
+
+  if not isinstance(inner, int):
+    raise ValueError('inner must be integer')
+  if not isinstance(pad_left, int):
+    raise ValueError('pad_left must be integer')
+  if not isinstance(pad_right, int):
+    raise ValueError('pad_right must be integer')
+
+  n = a.shape[0]
+  # return np.vstack(a[i:1+n+i-width:stride] for i in range(width)).T
+  start_ind = 0
+  stop_ind = pad_left + inner + pad_right
+  ctr = 0
+  window_list = []
+  inds_list = []
+  while stop_ind <= n:
+    temp_window = a[start_ind:stop_ind]
+    window_list.append(temp_window)
+    inds_list.append((start_ind, stop_ind))
+
+    start_ind += inner
+    stop_ind += inner
+    ctr += 1
+  return window_list, inds_list
+
+
+def extract_windows(a, width, stride=None, padding=0, auto_cast=True):
+  """Excise windows from the array.
+
+  Args:
+    a (array-like): Array to slice up.
+    width (int): Width of outer window without padding.
+    stride (int, None, optional): Width of inner window steps.
+    padding (int, optional): Amount of padding to apply to each side of the
+      inner window, this is probably to allow skipping samples.
+    auto_cast (bool, optional): If True, will coerce all arguments to the
+      appropriate types.
+
+  Returns:
+    np.array: extracted windows
+  """
+  width = 2 * padding + width
+  stride = width if stride is None else stride
+
+  if auto_cast:
+    width = int(width)
+    stride = int(stride)
+
+  if not isinstance(width, int):
+    raise ValueError('width must be integer')
+  if not isinstance(stride, int):
+    raise ValueError('stride must be integer')
+
+  n = a.shape[0]
+  return np.vstack(a[i:1+n+i-width:stride] for i in range(width)).T
+
+
+def extract_chunks_vectorized(a, width, auto_cast=True):
+  width = int(width) if auto_cast else width
+
+  if not isinstance(width, int):
+    raise ValueError('width must be integer')
+
+  max_samples = int((len(a) // width) * width)
+  out = a[:max_samples].reshape((-1, width))
+  return out
 
 
 def conjunction(*conditions):
@@ -54,6 +324,7 @@ def split_list_by_percentages(list_to_split, split_dict, randomize=False, strict
 
 
 def ndirname(path, n=1):
+  n -= 1
   out_path = path
   for i in range(n):
     out_path = os.path.dirname(out_path)
@@ -120,6 +391,7 @@ def make_iterable(x):
   x_list = [x, ] if np.isscalar(x) else x
   return x_list
 
+
 def strip_extension(fn):
   """Remove the filename extension by removing text to the right of the
   last '.'
@@ -163,6 +435,26 @@ def format_time(t, format='%H:%M:%S'):
     str: String description of the time.
   """
   return strftime(format, gmtime(t))
+
+
+def get_timestamp(filename_safe=False, **kwargs):
+  """Get a current timestamp with month, day, year, hour, and minute
+  information.
+
+  Args:
+    filename_safe (bool, optional): If False (default), will return a
+      human-readable timestamp; if True, will return a timestamp
+      suitable for using in filenames.
+    **kwargs: Additional keyword arguments. `str_format` can be used to
+      set the format of the output.
+
+  Returns:
+    str: A string containing the timestamp information.
+  """
+  str_format = '%Y-%m-%d-%H%M' if filename_safe else '%b-%d-%Y-%H:%M'
+  str_format = kwargs['str_format'] if 'str_format' in kwargs else str_format
+  return datetime.datetime.now().strftime(str_format)
+
 
 
 def printiv(to_print, verbose, verbose_threshold=1):
@@ -222,6 +514,7 @@ def cpprint(to_print, *args, flush=True):
   if flush:
     sys.stdout.flush()
 
+
 def print_replace(to_print):
   """Replace the current line in the terminal with the new message.
 
@@ -241,19 +534,27 @@ def touch_dir(path, mode=0o755):
   """
   # ipdb.set_trace()
   if not os.path.isdir(path):
-    os.makedirs(path, mode=mode)
+    try:
+      os.makedirs(path, mode=mode)
+    except FileExistsError as e:
+      print('dir exists: ', e)
 
 
-def filtered_walk(in_path, filter_fx=None, cull_hidden=True):
+def filtered_walk(in_path, filter_fx=None, cull_hidden=True, sort=False):
   """Perform a walk on the provided directory, filtering the results.
 
-    Args:
+  Args:
       in_path (str): Path to top-level directory from which to start the
-      walk.
+        walk.
       filter_fx (function, optional): A function that returns False for
-      files to discard and True for files to keep.
+        files to discard and True for files to keep.
+      cull_hidden (bool, default=True): Determines if hidden files
+        (those that start with '.') should be included in the output.
+      sort (bool, default=False): Determines if the output list should
+        be sorted alphabetically; NOTE: this can cause out of order
+        directory structure, not recommended for nested directories.
 
-    Returns:
+  Returns:
       fn_to_process (list): A list of strings containing the paths that
       passed the filter_fx test.
   """

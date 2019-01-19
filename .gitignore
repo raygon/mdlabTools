@@ -5,4 +5,5 @@
 *.ipynb_checkpoints
 __pycache__
 *.log
-sftp-config.json
+sftp-config*
+deprecated/

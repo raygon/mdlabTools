@@ -1,9 +1,9 @@
+"""NOTE: import ipdb fucks with this and breaks everything
+"""
 from re import search as re_search
 import subprocess
 from mdlab.utilfx import printiv, make_iterable
-# import pdb
-# class SlurmJob(object):
-#   def __init__(self, time=None, memory=None, n_cores=None, n_nodes=None, n_gpus=None, gpu_type=None):
+import pdb as ipdb
 
 
 def sort_and_freeze_kwargs(kwargs_sort_keys, **kwargs):
@@ -20,6 +20,11 @@ def kwargs_to_fire_cli(**kwargs):
 
 def wrap_fire(src_file, fx):
   return SlurmJob.wrap_fire(src_file, fx)
+
+
+def format_slurm_array_task_id_str(format_str):
+  bash_str = '\$(printf \%s \$SLURM_ARRAY_TASK_ID)' % format_str  # use bash to perform the zero-padding
+  return bash_str
 
 
 class SlurmJob(object):
@@ -109,12 +114,16 @@ class SlurmJob(object):
 
     if array is None:
       array_str = ''
+      array_id_str = ''
     elif isinstance(array, range):
       array_str = '--array=%s-%s' % (min(array), max(array))
+      array_id_str = ' --slurm_array_task_id \$SLURM_ARRAY_TASK_ID'
     elif isinstance(array, int) or isinstance(array, list) or isinstance(array, tuple):
       array_str = '--array=' + ','.join(['%s' % x for x in make_iterable(array)])
+      array_id_str = ' --slurm_array_task_id \$SLURM_ARRAY_TASK_ID'
     else:
       array_str = array
+      array_id_str = ' --slurm_array_task_id \$SLURM_ARRAY_TASK_ID'
     array_str =  array_str.strip()
 
 
@@ -125,20 +134,20 @@ class SlurmJob(object):
       qos_str = qos_str.strip()
 
       # pdb.set_trace()
-      fire_cli_str = wrap_fire(src_file, fx)(*args, **kwargs)
-      slurm_str = 'sbatch %s %s %s %s --wrap="echo %s; %s"' % (array_str, dependency_str, qos_str, self.get_resource_str(), fire_cli_str, fire_cli_str)
-      # fire_cli_str = 'python dfGenerateStimuliSubsetManager.py square \$SLURM_ARRAY_TASK_ID'
-      # slurm_str = 'sbatch %s %s %s %s --wrap="echo %s; %s"' % (array_str, dependency_str, qos_str, self.get_resource_str(), fire_cli_str, fire_cli_str)
+      fire_cli_str = wrap_fire(src_file, fx)(*args, **kwargs) + array_id_str
+      slurm_str = 'sbatch %s %s %s %s --wrap="echo %s; %s"' % (array_str, dependency_str, qos_str, self.get_resource_str(), fire_cli_str, fire_cli_str)  # why is fire_cli_str duplicated? --> The command is first echoed then executed
+            # fire_cli_str = 'python dfGenerateStimuliSubsetManager.py square \$SLURM_ARRAY_TASK_ID'
       slurm_str = slurm_str.strip()
 
       if array:  #TODO fix this hack
         old_output = self.output
-        self.output = 'slurm_%A_%a.out'
+        self.output = 'slurm_%A_%3a.out'
 
       if dry:
         printiv('DRY ---> %s' % slurm_str, verbose, 2)
         job_id = 'dry'
       else:
+        print(slurm_str)
         job_id = subprocess.run(slurm_str, shell=True, stdout=subprocess.PIPE).stdout.decode('utf-8')
         match = re_search('\d+', job_id)
         if match:
