@@ -76,6 +76,151 @@ def append_null_class_to_df(df_fn, columns=['corpus', 'path', 'source'], null_cl
   return df
 
 
+def balance_dataframe(df, column, group_weights={}, verbose=1):
+  # if isinstance(df, DataFrameHDF):
+  #   bdf = df
+  #   df = df.dataframe
+
+  weights_column = 'weights_%s' % column
+  df[weights_column] = np.nan
+
+  # df_grouped = df.groupby(column)
+  # per_class_weight = 1 / len(df_grouped)
+
+  df_grouped = df.groupby(column)
+  if group_weights is None:  # equal weighting between class groups
+    df_test = df.get(['path', *column])  # use 'path' for counts column
+    per_class_weight = 1 / len(df_grouped)
+    df_test['group_weight'] = per_class_weight
+  elif isinstance(group_weights, str):  # use group_weights column from df dataframe
+    df_test = df.get(['path', *column, group_weights])  # use 'path' for counts column
+    df_test.rename(column={group_weights: 'group_weight'}, inplace=True)
+  else:  # should be dict of {group name(s): weight}; remaining probability mass will be split equally between unspecified groups
+    # total_weight = np.sum([x for x in group_weights.values()])
+    total_weight = np.sum([x[-1] for x in group_weights])
+    if total_weight > 1:
+      raise ValueError('group_weights sum cannot be larger than 1')
+    remaining_weight = 1 - total_weight
+    print(total_weight, remaining_weight)
+    df_test = df.get(['path', *column])
+    df_test['group_weight'] = remaining_weight / (len(df_grouped) - len(group_weights))
+
+    # group_weights = [('__null__', '__null__')]
+    # # query_dict = [list(toolz.interleave([column, x])) for x in group_weights]
+    # group_weights_str = [list(map(lambda xx: '"%s"' % xx, x)) for x in group_weights]
+    # print(group_weights_str)
+    # # query_dict = [urlencode(dict(zip(column, x))) for x in group_weights_str]
+    # query_str = [dict(zip(column, x)) for x in group_weights_str]
+    # query_str = [urlencode(x).replace('%22', '"').replace('=', '==') for x in query_str]
+    # # print(query_dict)
+    # # query_str = urlencode(query_dict)
+    print(group_weights)
+    # query_str_list = {make_pandas_query_str(column, v[:-1]): v[-1] for v in group_weights}
+    query_str_list = [(make_pandas_query_str(column, v[:-1]), v[-1]) for v in group_weights]
+    # df_test['group_weight'] = remaining_weight / (len(df_grouped) - len(df_test.query()))
+    print(query_str_list)
+    for k, v in query_str_list:
+      df_test['group_weight'].loc[df_test.query(k).index] = v
+    # df_test['group_weight'].loc[df_test.query(query_str_list[0]).index] = 0.04
+    # df_test['group_weight'].loc[df_test.query('speaker == "__null__" & word == "__null__"').index] = 0.04
+    # display(df_test.tail())
+    # ipdb.set_trace()
+  df_test.rename(columns={'path': 'group_count'}, inplace=True)
+
+  df_grouped = df_test.groupby(column)
+
+  # if group_weights is None:  # equal weighting between class groups
+  #   per_class_weight = 1 / len(df_grouped)
+  #   df_grouped['group_weight'] = per_class_weight
+  #   # class_weights = {x: 1 / len(df[column].unique()) for x in df[column].unique()}  # balanced corpora
+  # elif isinstance(group_weights, str):  # use group_weights column from df dataframe
+  #   df_grouped['group_weight'] = df[group_weights]
+  # else:
+  #   df_grouped['group_weight'] = corpus_weights
+
+  group_counts = df_grouped['group_count'].count()
+  df = df.join(group_counts, on=column)  # shouldn't require suffixes
+  # df[weights_column] = per_class_weight / df['group_count']
+  df[weights_column] = df_test['group_weight'] / df['group_count']
+  # display(df)
+
+  # for col, df_subset in df_grouped:
+  #   print(col)
+  #   print(len(df_subset))
+  #   subset_weight = per_class_weight / len(df_subset)  # equal weighting between classes
+  #   # ipdb.set_trace()
+  #   df[weights_column].loc[df_subset.index] = subset_weight
+  #   # df[weights_column][mask_col] = class_weights[col] / mask_col.sum()  # equal weighting between classes
+  #   break
+
+  if verbose > 0:
+    print('`weights` column sum:', df[weights_column].sum())
+
+  if verbose > 0:
+    print('post weighted dataframe summary --> balance_column: %s, weights_column: %s' % (column, weights_column))
+    # print(df[[weights_column, column]].groupby(column).sum()) # pre May 11, 2018
+    # print(df.dataframe[[weights_column, column]].groupby(column).sum())  # make compatible with DataFrameHDF
+
+  # if isinstance(df, DataFrameHDF):
+  #   bdf.dataframe = df
+  #   df = bdf
+
+  return df, weights_column
+
+
+def add_weights_to_dataframe(df, column, corpus_weights=None, verbose=1):
+  """Weight each sample (row) in the dataframe, balanced based on the
+  groups in `column`.
+
+  Args:
+    df (pd.DataFrame): Source dataframe to add a weights column to; will
+      be operated in place.
+    column (str): The name of the column to balance.
+    corpus_weights (None, {group_name (str): group_weight (float)}, optional):
+      Determine how to weight the groups to be balanced. If None, groups
+      will be balanced equally; otherwise, use a dict of group_name:group_weight
+      pairs to define the group class weights.
+    verbose (int, optional): Print extra output, if requested.
+
+  Returns:
+    pd.DataFrame: updated dataframe with weights column
+    str: the name of the created weights column
+  """
+  # if isinstance(df, DataFrameHDF):
+  #   bdf = df
+  #   df = df.dataframe
+
+  weights_column = 'weights_%s' % column
+  df[weights_column] = np.nan
+  raw_weights = df.groupby(column).count()['path'] / len(df)
+
+  if corpus_weights is None:
+    class_weights = {x: 1 / len(df[column].unique()) for x in df[column].unique()}  # balanced corpora
+  else:
+    class_weights = corpus_weights
+
+  if verbose > 0:
+    print('Corpus Sampling Weights -->', class_weights)
+
+  for col, w in raw_weights.iteritems():
+    mask_col = df[column] == col
+    df[weights_column][mask_col] = class_weights[col] / mask_col.sum()  # equal weighting between classes
+
+  if verbose > 0:
+    print('`weights` column sum:', df[weights_column].sum())
+
+  if verbose > 0:
+    print('post weighted dataframe summary --> balance_column: %s, weights_column: %s' % (column, weights_column))
+    # print(df[[weights_column, column]].groupby(column).sum()) # pre May 11, 2018
+    # print(df.dataframe[[weights_column, column]].groupby(column).sum())  # make compatible with DataFrameHDF
+
+  # if isinstance(df, DataFrameHDF):
+  #   bdf.dataframe = df
+  #   df = bdf
+
+  return df, weights_column
+
+
 class DataFrameHDF(object):
   """Data structure to maninpulate/store metadata as pandas DataFrames
   and data arrays as ndarrays in the same HDF5 file."""
