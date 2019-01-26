@@ -7,3 +7,6 @@ __pycache__
 *.log
 sftp-config*
 deprecated/
+
+# Sphinx documentation
+docs/build/
