@@ -18,50 +18,131 @@ import mdlab.utilfx as utilfx
 import pdb as ipdb
 
 
-def sphere_to_wav(fn_sphere, out_fn=None, dry=False):
-  if out_fn is None:
-    fn_wav = ''.join([os.path.splitext(fn_sphere)[0], '.wav'])
-  else:
-    fn_wav = out_fn
-  print('%s --> %s' % (fn_sphere, fn_wav))
-  if not dry:
-    utilfx.touch_dir(os.path.dirname(fn_wav))
-    return subprocess.call(['sph2pipe', fn_sphere, fn_wav])
+def play(s, sr, pause_s=0, interact=True, **kwargs):
+  """Jupyter notebook based audio playback.
+
+  Args:
+    s (array-like): Signal waveform array to playback.
+    sr (int): Sampling rate for audio playback.
+    pause_s (number, default=0): Amount of time to wait after playback
+      before completing; useful for adding silence between consecutive
+      playback calls.
+    interact (bool, default=True): Determines if audio element will be
+      displayed. If ``True``, playback element will be created and
+      displayed. If ``False``, the playback element will only be
+      created and not displayed.
+    **kwargs: Optional keyword arguments to pass to the underlying
+      IPython.display.Audio call.
+
+      * **autoplay** (*bool*): If ``True``, will initiate playback once
+        the element is displayed.
+
+  Returns:
+    `IPython.display.Audio`:
+      **audio_elem**-- The playback element for the provided signal at
+        the provided sampling rate. Can be displayed in a notebook.
+  """
+  pause_s = pause_s + len(s) / sr if pause_s is True else pause_s
+  audio_elem = IPython.display.Audio(s, rate=sr, **kwargs)
+  if interact:
+    audio_elem = IPython.display.display(audio_elem)
+    time.sleep(pause_s)
+  return audio_elem
 
 
-def dir_convert_sphere_to_wav(path, out_dir=True, fx_filter=None, dry=False):
-  fx_filter = lambda x: x.endswith('.sph') and os.path.isfile(x) if fx_filter is None else fx_filter
-  fntp = [os.path.join(path, f) for f in os.listdir(path) if fx_filter(f)]
+#############################################
+###---------- SIGNAL ATTRIBUTES ----------###
+#############################################
+def rms(a, strict=True):
+  """Compute root mean squared of array.
+  WARNING: THIS BREAKS WITH AXIS, only works on vector input.
 
-  out_dir = os.path.join(path, 'wav') if out_dir is True else out_dir
+  Args:
+    a (array): Input array.
 
-  for fn in fntp:
-    out_fn = os.path.join(out_dir, os.path.basename(os.path.splitext(fn)[0] + '.wav'))
-    sphere_to_wav(fn, out_fn=out_fn, dry=dry)
-    # sphere_to_wav(fn, out_fn=None, dry=dry)
+  Returns:
+    array:
+      **rms_a**: Root-mean-squared of array.
+  """
+  out = np.sqrt(np.mean(a * a))
+  if strict and np.isnan(out):
+    raise ValueError('rms calculation resulted in a nan: this will affect ' +
+                     'later computation. Ignore with `strict`=False')
+  return out
+
+
+def get_channels(signal):
+  n_channels = 1
+  if signal.ndim > 1:
+    n_channels = signal.shape[1]
+  return n_channels
+
+
+def pwelch_db(x, fs, **kwargs):
+  fxx, pxx = scipy.signal.welch(x, fs=fs, **kwargs)
+  pxx = 10 * np.log10(pxx)
+  return fxx, pxx
 
 
 def get_length_after_polyphase_resample(signal_length, from_sr, to_sr, invert=False):
-    """Compute the approximate length of the signal after polyphase
-    resampling (scipy.signal.resample_poly).
+  """Compute the approximate length of the signal after polyphase
+  resampling (i.e., scipy.signal.resample_poly).
 
-    Args:
-      signal_length (TYPE): Description
-      from_sr (TYPE): Description
-      to_sr (TYPE): Description
-      invert (bool, optional): Description
+  Args:
+    signal_length (TYPE): Description
+    from_sr (TYPE): Description
+    to_sr (TYPE): Description
+    invert (bool, optional): Description
 
-    Returns:
-      TYPE: Description
-    """
-    from_sr, to_sr = (to_sr, from_sr) if invert else (from_sr, to_sr)
-    return np.ceil(signal_length * (int(to_sr) / from_sr))
+  Returns:
+    TYPE: Description
+  """
+  from_sr, to_sr = (to_sr, from_sr) if invert else (from_sr, to_sr)
+  return np.ceil(signal_length * (int(to_sr) / from_sr))
+
+
+#############################################
+###---------- SIGNAL ALTERATION ----------###
+#############################################
+def combine_signal_and_noise(signal, noise, snr, rms_mask=None):
+  """Combine the signal and noise at the provided snr.
+
+  Args:
+    signal (array-like): Signal waveform data.
+    noise (array-like): Noise waveform data; same shape as `signal`.
+    snr (number): SNR level in dB.
+    rms_mask (None, optional): Optional binary mask with the same shape
+      as `signal` to use for the snr calculation. Mask values of 1 will
+      be included in the calculation, values of 0 will be ignored. This
+      mask will be applied to both `signal` and `noise`.
+
+  Returns:
+    `ndarray`:
+    **signal_and_noise**-- Combined signal and noise waveform.
+  """
+  # normalize the signal
+  # signal = signal / rms(signal)
+  # sf = np.power(10, snr / 10)
+  # signal_rms = rms(signal)
+  # noise = noise * ((signal_rms / rms(noise)) / sf)
+  # signal_and_noise = signal + noise
+  # return signal_and_noise
+
+  # ipdb.set_trace()
+  rms_mask = np.full(len(signal), True, dtype=bool) if rms_mask is None else rms_mask
+  signal = signal / rms(signal[rms_mask])
+  # sf = np.power(10, snr / 10)
+  sf = np.power(10, snr / 20) # Mar 15, 2018
+  signal_rms = rms(signal[rms_mask])
+  noise = noise * ((signal_rms / rms(noise[rms_mask])) / sf)
+  signal_and_noise = signal + noise
+  return signal_and_noise
 
 
 def strip_silence(signal, db_threshold=-20):
   """Strip silence from the beginning and end of the signal.
 
-  "Silent" regions are defined as any place where the signal power is
+  "Silent regions" are defined as any place where the signal power is
   lower than `db_thershold` below the signal's peak amplitude. The
   longest silent regions at the start and end of the signal will be
   removed
@@ -71,6 +152,9 @@ def strip_silence(signal, db_threshold=-20):
     db_threshold (TYPE, default=-60): Set silence threshold in terms
       of dB below the peak amplitude. Any sample below this threshold
       will be considered silence.
+
+  Returns:
+    TYPE: Description
   """
   amp_threshold = np.abs(signal).max() * 10 ** (db_threshold / 10)
   above_threshold_mask = np.abs(signal) >= amp_threshold
@@ -95,38 +179,12 @@ def strip_silence(signal, db_threshold=-20):
   return signal[ind_first:ind_last], (ind_first, ind_last)
 
 
-def combine_signal_and_noise(signal, noise, snr, rms_mask=None):
-  """Combine the signal and noise at the provided snr.
 
-  Args:
-    signal (array-like): Signal waveform data.
-    noise (array-like): Noise waveform data; same shape as `signal`.
-    snr (number): SNR level in dB.
-    rms_mask (None, optional): Optional binary mask with the same shape
-      as `signal` to use for the snr calculation. Mask values of 1 will
-      be included in the calculation, values of 0 will be ignored. This
-      mask will be applied to both `signal` and `noise`.
-
-  Returns:
-    **signal_and_noise**: Combined signal and noise waveform.
-  """
-  # normalize the signal
-  # signal = signal / rms(signal)
-  # sf = np.power(10, snr / 10)
-  # signal_rms = rms(signal)
-  # noise = noise * ((signal_rms / rms(noise)) / sf)
-  # signal_and_noise = signal + noise
-  # return signal_and_noise
-
-  # ipdb.set_trace()
-  rms_mask = np.full(len(signal), True, dtype=bool) if rms_mask is None else rms_mask
-  signal = signal / rms(signal[rms_mask])
-  # sf = np.power(10, snr / 10)
-  sf = np.power(10, snr / 20) # Mar 15, 2018
-  signal_rms = rms(signal[rms_mask])
-  noise = noise * ((signal_rms / rms(noise[rms_mask])) / sf)
-  signal_and_noise = signal + noise
-  return signal_and_noise
+def pure_tone(f0_hz, dur_ms=50, sr=16000):
+  dur_samples = dur_ms / 1000 * sr
+  t = np.linspace(0, dur_ms / 1000, dur_samples)
+  out = np.sin(2 * np.pi * f0_hz * t)
+  return out
 
 
 def dfGenerateSynthSignal(t, sr, f0, lowH, uppH, phaseMode, slope=None, phaseOffset=None, useHannWindow=True, stimStatMode='falloff', useStrict=True, timeOffset=0, per_harm_fx=None):
@@ -181,10 +239,27 @@ def dfGenerateSynthSignal(t, sr, f0, lowH, uppH, phaseMode, slope=None, phaseOff
   return ct
 
 
-def pwelch_db(x, fs, **kwargs):
-  fxx, pxx = scipy.signal.welch(x, fs=fs, **kwargs)
-  pxx = 10 * np.log10(pxx)
-  return fxx, pxx
+###########################################
+###---------- FREQUENCY TOOLS ----------###
+###########################################
+def get_semitone_difference(x, y):
+  """Compute the difference between x and y (x - y) in semitones.
+
+  Args:
+    x (array-like):
+    y (array-like):
+  """
+  return 12 * np.log2(x / y)
+
+
+def add_semitone_offset(center_freq, n_semitones):
+  """Add
+
+  Args:
+    center_freq (array-like):
+    n_semitones (array-like):
+  """
+  return center_freq * 2.0**(n_semitones / 12)
 
 
 def get_allowable_f0_range(center_frequency, range_offsets, offset_mode='semitone'):
@@ -206,53 +281,9 @@ def get_allowable_f0_range(center_frequency, range_offsets, offset_mode='semiton
   return out
 
 
-def play(s, sr, pause_s=0, interact=True, **kwargs):
-  pause_s = pause_s + len(s) / sr if pause_s is True else pause_s
-  audio_elem = IPython.display.Audio(s, rate=sr, **kwargs)
-  if interact:
-    audio_elem = IPython.display.display(audio_elem)
-    time.sleep(pause_s)
-  return audio_elem
-
-
-def pure_tone(f0_hz, dur_ms=50, sr=16000):
-  dur_samples = dur_ms / 1000 * sr
-  t = np.linspace(0, dur_ms / 1000, dur_samples)
-  out = np.sin(2 * np.pi * f0_hz * t)
-  return out
-
-
-def rms(a, strict=True):
-  """Compute root mean squared of array.
-  WARNING: THIS BREAKS WITH AXIS, only works on vector input.
-
-  Args:
-    a (array): Input array.
-
-  Returns:
-    array:
-      **rms_a**: Root mean squared of array.
-  """
-  out = np.sqrt(np.mean(a * a))
-  if strict and np.isnan(out):
-    raise ValueError('rms calculation resulted in a nan: this will affect ' +
-                     'later computation. Ignore with `strict`=False')
-  return out
-
-
-def load_audio(rfn, signal_key='signal', rate_key='sr'):
-  rfn_lower = rfn.lower()
-  if rfn_lower.endswith('.wav'):
-    sr, s = wavfile.read(rfn)
-  elif rfn_lower.endswith('.mat'):
-    out_data = loadmat(rfn)
-    s = out_data[signal_key]
-    sr = out_data[rate_key]
-  else:
-    raise NotImplementedError('load_audio is not defined for file type: %s' % rfn)
-  return s, sr
-
-
+################################
+###---------- MIDI ----------###
+################################
 def midi_to_freq(midi_number, semitone_only=True):
   """Convert the midi note number to frequency in Hz.
 
@@ -300,9 +331,25 @@ def freq_to_midi(freq, semitone_only=True):
   return midi_number
 
 
+######################################
+###---------- DEPRECATED ----------###
+######################################
 def parse_rescale_arg(rescale):
-  """ Parse the rescaling argument to a standard form. Throws an error if rescale
-    value is unrecognized.
+  """DEPRECATED: try librosa.load; preference for no rescaling, or only
+  rescaling before playback.
+  Parse the rescaling argument to a standard form. Throws an error if rescale
+  value is unrecognized.
+
+  Args:
+    rescale (str): String that determines type of rescaling to perform;
+      see :func:`~mdlab.audioTools.wav_to_array` for specifics.
+
+  Returns:
+    `out_rescaled`:
+    * **str** The standardized version of the ``rescale`` argument.
+
+  Raises:
+    ValueError
   """
   _rescale = rescale.lower()
   if _rescale == 'normalize':
@@ -316,27 +363,35 @@ def parse_rescale_arg(rescale):
   return out_rescale
 
 
-def get_channels(signal):
-  n_channels = 1
-  if signal.ndim > 1:
-    n_channels = signal.shape[1]
-  return n_channels
-
-
 def wav_to_array(fn, rescale='standardize'):
-  """ Reads wav file data into a numpy array.
+  """DEPRECATED: try librosa.load
+  Reads wav file data into a numpy ndarray and rescales values
+  according to ``rescale`` argument.
 
-    Args:
-      fn (str): path to .wav file
-      normalize (str): Determines type of rescaling to perform. 'standardize' will
-        divide by the max value allowed by the numerical precision of the input.
-        'normalize' will rescale to the interval [-1, 1]. None or '' will not
-        perform rescaling.
+  Args:
+    fn (str): path to .wav file
+    normalize ({'standardize', 'normalize', None}; default='standardize'): Determines
+      type of rescaling to perform. 'standardize' will divide by the
+      max value allowed by the numerical precision of the input.
+      'normalize' will rescale to the interval [-1, 1]. ``None`` will
+      not perform rescaling.
 
-    Returns:
-      snd, samp_freq (int, np.array): Sampling frequency of the input sound, followed
-        by the sound as a numpy-array .
+  Returns:
+    snd, samp_freq (int, np.array): Sampling frequency of the input sound, followed
+      by the sound as a numpy-array.
+
+  Returns:
+    `tuple`:
+    A tuple containing:
+
+      * **snd** (*ndarray*)-- The sound waveform, from the file.
+      * **samp_freq** (*int*)-- The sampling rate in Hz.
+
+  Raises:
+    warnings.DeprecationWarning
   """
+  raise warnings.DeprecationWarning('General loading is being deprecated; you should probably ' +
+                                    'use something that is more documented and feature rich, like librosa.load.')
   _rescale = parse_rescale_arg(rescale)
   samp_freq, snd = wavfile.read(fn)
   if _rescale == 'standardize':
@@ -347,7 +402,60 @@ def wav_to_array(fn, rescale='standardize'):
   return snd, samp_freq
 
 
+def load_audio(rfn, signal_key='signal', rate_key='sr'):
+  """DEPRECATED: try librosa.load and stop using MATLAB.
+  Intended to be a general loader for signal waveform array data.
+
+  Args:
+    rfn (str): Path to file from which to load signal waveform data.
+    signal_key (str, default='signal'): Specify the key-name to lookup
+      the signal data  associated with the file; useful if the input file
+      is formatted as key-value pairs.
+    rate_key (str, default='sr'): Specify the key-name to lookup the
+      sampling rate associated with the file; useful if the input file
+      is formatted as key-value pairs.
+
+  Returns:
+    `tuple`:
+    A tuple containing:
+
+      * **s** (*ndarray*)-- The sound waveform, from the file.
+      * **sr** (*int*)-- The sampling rate in Hz.
+  Raises:
+    NotImplementedError
+    warnings.DeprecationWarning
+  """
+  # raise warnings.DeprecationWarning('General loading is being deprecated; you should probably ' +
+  #                                   'use something that is more documented and feature rich, like librosa.load.')
+  dep_msg = 'General loading is being deprecated; you should probably use something that is more documented and feature rich, like librosa.load.'
+  raise warnings.warn(+DeprecationWarning)
+  rfn_lower = rfn.lower()
+  if rfn_lower.endswith('.wav'):
+    sr, s = wavfile.read(rfn)
+  elif rfn_lower.endswith('.mat'):
+    out_data = loadmat(rfn)
+    s = out_data[signal_key]
+    sr = out_data[rate_key]
+  else:
+    raise NotImplementedError('load_audio is not defined for file type: %s' % rfn)
+  return s, sr
+
+
 def play_array(signal, pyaudio_params={}):
+  """DEPRECATED: try ``play`` or Jupyter Notebook features.
+  Play the provided signal via PyAudio; be careful with rescaling
+  values, as this can get dangerously loud.
+
+  Args:
+    signal (array-like): Signal waveform array, e.g., as returned from
+      ``wav_to_array``.
+    pyaudio_params (dict, optional): Dictionary of keyword arguments
+      to pass to pyaudio backend.
+
+  Raises:
+    warnings.DeprecationWarning
+  """
+  raise warnings.DeprecationWarning('PyAudio playback is being deprecated for IPython Notebook playback, see: ``play``')
   _pyaudio_params = {'format': pyaudio.paFloat32,
                      'channels': 1,
                      'rate': 44100,
@@ -374,24 +482,70 @@ def play_array(signal, pyaudio_params={}):
   stream.write(data)
 
 
-def get_semitone_difference(x, y):
-  """Compute the difference between x and y (x - y) in semitones.
+#############################################
+###---------- FORMAT CONVERSION ----------###
+#############################################
+def sphere_to_wav(fn_sphere, out_fn=None, dry=False):
+  """Convert audio file from SPHERE format to WAV  files (e.g., for
+  corpora from the Linguistic Data Consortium like Wall Street Journal).
+
+  NOTE: This requires that sph2pipe is installed, see
+  https://www.ldc.upenn.edu/language-resources/tools/sphere-conversion-tools.
 
   Args:
-    x (array-like):
-    y (array-like):
+    fn_sphere (str): Path to SPHERE file to convert.
+    out_fn (str, default=None): Path to write the results of the
+      conversion. If ``None``, will attempt to change the file extension
+      to .wav and write in the same location as ``fn_sphere``.
+    dry (bool; default=False): If ``False``, conversion will occur and
+      the output will be written to disk. If ``True``, only a summary
+      of the work will be printed.
+
+  Returns: TODO
+    `MatlabEngine`:
+    * **matlab_engine** A MATLAB engine for performing computation.
+
   """
-  return 12 * np.log2(x / y)
+  if out_fn is None:
+    fn_wav = ''.join([os.path.splitext(fn_sphere)[0], '.wav'])
+  else:
+    fn_wav = out_fn
+  print('%s --> %s' % (fn_sphere, fn_wav))
+  if not dry:
+    utilfx.touch_dir(os.path.dirname(fn_wav))
+    return subprocess.call(['sph2pipe', fn_sphere, fn_wav])
 
 
-def add_semitone_offset(center_freq, n_semitones):
-  """Add
+def dir_convert_sphere_to_wav(path, out_dir=True, fx_filter=None, dry=False):
+  """Convert all of the SPHERE formatted files in a given directory
+  to WAV files (e.g., for corpora from the Linguistic Data Consortium).
+
+  By default, only the files with "*.sph" extension will be converted.
 
   Args:
-    center_freq (array-like):
-    n_semitones (array-like):
+    path (str): Convert to SPHERE to WAV files within this directory.
+    out_dir (bool, str; default=True): Determines the directory where
+      converted files will be written. If ``True``, converted files
+      will be written in the same directory as the unconverted files.
+      This can be a str containing the path to the output directory
+      where output will be written.
+    fx_filter (callable, default=None): Function that will be used
+      to select files for conversion from the parent directory in
+      ``path`` by returning True. By default, this will only keep
+      files that end in ".sph" for conversion.
+    dry (bool, default=False): If ``False``, conversion will occur and
+      the output will be written to disk. If ``True``, only a summary
+      of the work will be printed.
+
   """
-  return center_freq * 2.0**(n_semitones / 12)
+  fx_filter = lambda x: x.endswith('.sph') and os.path.isfile(x) if fx_filter is None else fx_filter
+  fntp = [os.path.join(path, f) for f in os.listdir(path) if fx_filter(f)]
+
+  out_dir = os.path.join(path, 'wav') if out_dir is True else out_dir
+
+  for fn in fntp:
+    out_fn = os.path.join(out_dir, os.path.basename(os.path.splitext(fn)[0] + '.wav'))
+    sphere_to_wav(fn, out_fn=out_fn, dry=dry)
 
 
 ###---------- MAINS ----------###

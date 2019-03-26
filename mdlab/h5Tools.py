@@ -35,6 +35,9 @@ def _h5_format(arr, mode='auto', **kwargs):
       return arr
 
   out = arr.tolist()
+  if kwargs.get('interact'):
+    # ipdb.set_trace()
+    pass
   if mode == 'array':
     out = np.array(out, **kwargs)
   elif mode == 'string':
@@ -170,19 +173,19 @@ def h5_naive_add_data(hdf_file, dset_name, data, axis=0, single_write=False, wri
   # if convert_dict_to_json and isinstance(data, dict):
   #   data = json.dumps(data, sort_keys=True)
 
-  convert_dict_to_json = True
-  if isinstance(data, str):
-    data = np.string_(data)
-  # else:
-  #   try:
-  #     data = np.atleast_1d(data)
-  #   except TypeError as e:
-  #     print('TYYPEERROR, not making into array')
-  # elif kwargs.get('convert_dict_to_json') and isinstance(data, dict):
-  elif convert_dict_to_json and not isinstance(data, np.ndarray):
-    data = json.dumps(data, sort_keys=True)
-  # else:
-    # raise ValueError('h5_naive_add_data failed: %s' % dset_name)
+  # convert_dict_to_json = True
+  # if isinstance(data, str):
+  #   data = np.string_(data)
+  # # else:
+  # #   try:
+  # #     data = np.atleast_1d(data)
+  # #   except TypeError as e:
+  # #     print('TYYPEERROR, not making into array')
+  # # elif kwargs.get('convert_dict_to_json') and isinstance(data, dict):
+  # elif convert_dict_to_json and not isinstance(data, np.ndarray):
+  #   data = json.dumps(data, sort_keys=True)
+  # # else:
+  #   # raise ValueError('h5_naive_add_data failed: %s' % dset_name)
 
   if single_write is True:
     hdf_file.create_dataset(dset_name, data=data, dtype=dtype)
@@ -193,6 +196,7 @@ def h5_naive_add_data(hdf_file, dset_name, data, axis=0, single_write=False, wri
       except AttributeError as e:
         maxshape = (None,)
 
+      print('dset_name: %s --> %s, %s' % (dset_name, maxshape, dtype))
       hdf_file.create_dataset(dset_name, data=data, maxshape=maxshape, dtype=dtype)
     else:
       h5_naive_concatenate(hdf_file[dset_name], data, axis=0, verbose=verbose, **kwargs)

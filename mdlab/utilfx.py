@@ -3,7 +3,6 @@ This module is intended to contain general purpose routines; any
 domain-specific tools (e.g., working with audio) should be grouped into
 a separate module.
 """
-import pprint
 import os
 import sys
 import numpy as np
@@ -16,7 +15,6 @@ from functools import cmp_to_key
 from warnings import warn
 from termcolor import colored, cprint
 from functools import reduce
-import importlib
 from pandas import notnull as pd_notnull
 from hashlib import sha1
 from base64 import b32encode
@@ -26,59 +24,6 @@ import json
 import pdb as ipdb
 import pprint
 ppr = pprint.PrettyPrinter()
-
-
-# def iimport(module_str_list, strict=True):
-#   for m in module_str_list:
-#     try:
-#       importlib.import_module(m)
-#     except Exception as e:
-#       if strict:
-#         raise e
-#       else:
-#         warn(e)
-
-def urlsafe_b32encode(s):
-  b32_str = b32encode(s)
-  return b32_str.decode().replace('=', '-')
-  # return b32_str.replace(b'=', b'-')
-
-
-def hash_if_too_long(s, max_len=255):
-  out_s = hash_str(s) if len(s) > max_len else s
-  return out_s
-
-
-def hash_str(x):
-  bin_digest = sha1(repr(x).encode()).digest()
-  b32_digest = urlsafe_b32encode(bin_digest)
-  return b32_digest
-
-
-def hash_json_dict(d, exclude_keys={}, **kwargs):
-  _d = {k: v for k, v in d.items() if k not in exclude_keys}
-  # ppr.pprint(_d)
-  _kwargs = {'sort_keys': True, 'ensure_ascii': True, 'indent': 2, 'separators': (',', ':')}
-  _kwargs.update(kwargs)
-  d_json = json.dumps(_d, **_kwargs)
-  return hash_str(d_json)
-
-
-def wrapped_write(write_fx, verbose=1):
-  def _fx(wfn, *args, **kwargs):
-    touch_dir(os.path.dirname(wfn))
-    out = write_fx(wfn, *args, **kwargs)
-    if verbose:
-      print('wrapped_write to --> %s' % wfn)
-    return wfn, out
-  return _fx
-
-
-def num_to_kstr(num):
-  """Convert a number to a string in Nk represenation (eg, '48k') if the
-  number is at least 1000k
-  """
-  return str(num) if num < 1000 else '%sk' % (num // 1000)
 
 
 def reduce_to_unique(array, axis=0, remove_nans=True):
@@ -111,42 +56,6 @@ def reduce_to_unique(array, axis=0, remove_nans=True):
   # print(valid_str, reduced_list)
 
   return reduced_list
-
-
-  # reduced_list = []
-  # reference_val = None
-  # for i, val in enumerate(array):
-  #   if reference_val is None:
-  #     if np.any(pd_notnull(val)):
-  #       reference_val = val
-  #   else:
-  #     is_equal = _compare_fx(val, reference_val)
-
-
-  # def _compare_fx(val, ref):
-  #   if remove_nans and np.any(np.isnan(val)):
-  #     out = np.nan
-  #   else:
-  #     out = np.all(ref == val)
-  #   return out
-
-  # reduced_list = []
-  # reference_val = None
-  # for i, val in enumerate(array):
-  #   if reference_val is None:
-  #     if remove_nans and np.all(pd_notnull(val)):
-  #       reference_val = val
-
-  #   if reference_val is not None:
-  #     is_equal = _compare_fx(val, reference_val)
-
-
-def join_iter(iterable, delimiter='_', strict=False):
-  if strict and iterable is None:
-    return None
-  else:
-    out = delimiter.join(map(str, iterable))
-    return out if out else None
 
 
 def compute_max_segments(signal_length, duration, padding=0):
@@ -185,7 +94,11 @@ def extract_random_window(a, width, start=None, stop=None, seed=None, verbose=1,
     stop = len(a) - width if stop is None else stop
     np.random.seed(seed)
 
-    start_ind = np.random.randint(start, stop)
+    try:
+      start_ind = np.random.randint(start, stop)
+    except ValueError as e:
+      ipdb.set_trace()
+
     stop_ind = start_ind + width
     out = a[start_ind:stop_ind]
 
@@ -356,6 +269,13 @@ def sort_multikey(items, columns):
   return sorted(items, key=cmp_to_key(comparer))
 
 
+def num_to_kstr(num):
+  """Convert a number to a string in Nk represenation (eg, '48k') if the
+  number is at least 1000k
+  """
+  return str(num) if num < 1000 else '%sk' % (num // 1000)
+
+
 def indicate_debug(s, debug_mode=False, prefix='debug_', suffix=''):
   """if debug_mode is True, add the prefix and suffix to the s.
   """
@@ -364,6 +284,9 @@ def indicate_debug(s, debug_mode=False, prefix='debug_', suffix=''):
   else:
     debug_str = s
   return debug_str
+
+
+
 
 
 def make_iterable(x):
@@ -392,20 +315,7 @@ def make_iterable(x):
   return x_list
 
 
-def strip_extension(fn):
-  """Remove the filename extension by removing text to the right of the
-  last '.'
-
-  Args:
-    fn (str): Filename with extension.
-
-  Returns:
-    str: Filename without extension.
-  """
-  return os.path.splitext(fn)[0]
-
-
-def grouper(iterable, n):
+def grouper(iterable, n_groups=1, chunk_size=None):
   """Group contents of iterable into groups of (at most) size n. If
   the iterable doesn't divide evenly into groups of size n, the last
   group will have fewer items.
@@ -418,9 +328,28 @@ def grouper(iterable, n):
   Returns:
     list: A list of lists containing the groups of size n.
   """
+  if n_groups is not None and chunk_size is not None:
+    raise ValueError('can only provide one of `n_groups` or `chunk_size`')
+  elif n_groups is not None:
+    n = int(np.ceil(len(iterable) / n_groups))
+  elif chunk_size is not None:
+    n = chunk_size
+  else:
+    raise ValueError('grouper arguments are malformatted')
+
   args = [iter(iterable)] * n
   # return ([e for e in t if e != None] for t in zip_longest(*args))
   return ([e for e in t if e is not None] for t in zip_longest(*args))
+
+
+def join_iter(iterable, delimiter='_', strict=False):
+  if strict and iterable is None:
+    return None
+  else:
+    out = delimiter.join(map(str, iterable))
+    return out if out else None
+
+
 
 
 def format_time(t, format='%H:%M:%S'):
@@ -456,19 +385,11 @@ def get_timestamp(filename_safe=False, **kwargs):
   return datetime.datetime.now().strftime(str_format)
 
 
-
-def printiv(to_print, verbose, verbose_threshold=1):
-  """Short name for `print_if_verbose` function, which will print the
-  message if verbosity level is above threshold.
-
-  Args:
-    to_print (object): Object to print, if type is `callable`, will
-      call the callable (just call it)
-    verbose (int, bool): The verbosity of this message.
-    verbose_threshold (int, optional): The threshold that must be
-      met or exceeded to print.
-  """
-  print_if_verbose(to_print, verbose, verbose_threshold)
+##########################################
+###---------- Print Functions----------###
+##########################################
+# def print_flush(*args, **kwargs):
+#   print(*args, **kwargs, flush=True)
 
 
 def print_if_verbose(to_print, verbose, verbose_threshold=1):
@@ -487,6 +408,42 @@ def print_if_verbose(to_print, verbose, verbose_threshold=1):
     flex_print(to_print)
 
 
+def printiv(to_print, verbose, verbose_threshold=1):
+  """Short name for `print_if_verbose` function, which will print the
+  message if verbosity level is above threshold.
+
+  Args:
+    to_print (object): Object to print, if type is `callable`, will
+      call the callable (just call it)
+    verbose (int, bool): The verbosity of this message.
+    verbose_threshold (int, optional): The threshold that must be
+      met or exceeded to print.
+  """
+  print_if_verbose(to_print, verbose, verbose_threshold)
+
+
+def print_replace(to_print):
+  """Replace the current line in the terminal with the new message.
+
+  Args:
+    to_print (str): Message to print.
+  """
+  sys.stdout.write('%s\r' % to_print)
+  sys.stdout.flush()
+
+
+def cpprint(to_print, *args, flush=True):
+  """PrettyPrinter with support for a callable.
+
+  Args:
+    to_print (object): Object to print with pprint, if type is
+    `callable`, will call the callable (just call it)
+  """
+  print(colored(ppr.pformat(to_print), *args))
+  if flush:
+    sys.stdout.flush()
+
+
 def flex_print(to_print, flush=True):
   """PrettyPrinter with support for a callable.
 
@@ -503,28 +460,9 @@ def flex_print(to_print, flush=True):
     sys.stdout.flush()
 
 
-def cpprint(to_print, *args, flush=True):
-  """PrettyPrinter with support for a callable.
-
-  Args:
-    to_print (object): Object to print with pprint, if type is
-    `callable`, will call the callable (just call it)
-  """
-  print(colored(ppr.pformat(to_print), *args))
-  if flush:
-    sys.stdout.flush()
-
-
-def print_replace(to_print):
-  """Replace the current line in the terminal with the new message.
-
-  Args:
-    to_print (str): Message to print.
-  """
-  sys.stdout.write('%s\r' % to_print)
-  sys.stdout.flush()
-
-
+################################################################
+###---------- File and Path Manipulation Functions ----------###
+################################################################
 def touch_dir(path, mode=0o755):
   """Make the directory if it doesn't exist
 
@@ -532,7 +470,6 @@ def touch_dir(path, mode=0o755):
     path (str): Path to directory to create if necessary.
     mode (int, optional): Octal mode to specific directory permissions.
   """
-  # ipdb.set_trace()
   if not os.path.isdir(path):
     try:
       os.makedirs(path, mode=mode)
@@ -575,6 +512,19 @@ def filtered_walk(in_path, filter_fx=None, cull_hidden=True, sort=False):
   return fn_to_process
 
 
+def strip_extension(fn):
+  """Remove the filename extension by removing text to the right of the
+  last '.'
+
+  Args:
+    fn (str): Filename with extension.
+
+  Returns:
+    str: Filename without extension.
+  """
+  return os.path.splitext(fn)[0]
+
+
 def is_hidden_file(fn):
   """Check if the provided file is a hidden file. This is just to make
   code more explicit.
@@ -588,6 +538,46 @@ def is_hidden_file(fn):
   return fn.startswith('.')
 
 
+def hash_json_dict(d, exclude_keys={}, **kwargs):
+  _d = {k: v for k, v in d.items() if k not in exclude_keys}
+  # ppr.pprint(_d)
+  _kwargs = {'sort_keys': True, 'ensure_ascii': True, 'indent': 2, 'separators': (',', ':')}
+  _kwargs.update(kwargs)
+  d_json = json.dumps(_d, **_kwargs)
+  return hash_str(d_json)
+
+
+def hash_str(x):
+  bin_digest = sha1(repr(x).encode()).digest()
+  b32_digest = urlsafe_b32encode(bin_digest)
+  return b32_digest
+
+
+def hash_if_too_long(s, max_len=255):
+  out_s = hash_str(s) if len(s) > max_len else s
+  return out_s
+
+
+def urlsafe_b32encode(s):
+  b32_str = b32encode(s)
+  return b32_str.decode().replace('=', '-')
+  # return b32_str.replace(b'=', b'-')
+
+
+def wrapped_write(write_fx, verbose=1):
+  def _fx(wfn, *args, **kwargs):
+
+    dest_dir = os.path.dirname(wfn)
+    if dest_dir:
+      touch_dir(dest_dir)
+    out = write_fx(wfn, *args, **kwargs)
+    if verbose:
+      print('wrapped_write to --> %s' % wfn)
+    return wfn, out
+  return _fx
+
+
+###---------- MISC ----------###
 def convert_precision(array, dtype, round_vals=True, error_on_clamp=False):
   """Reduce numerical precision of input by rescaling depending on the
     dtype.

@@ -3,6 +3,7 @@ import pandas as pd
 import dask
 import dask.array as da
 from dask.diagnostics import ProgressBar
+from joblib import Parallel, delayed
 import os
 import time
 import numpy as np
@@ -16,6 +17,305 @@ import mdlab.utilfx as utilfx
 import pdb as ipdb
 import pprint
 ppr = pprint.PrettyPrinter()
+
+
+class DataFrameHDF(object):
+  """Data structure to maninpulate/store metadata as pandas DataFrames
+  and data arrays as ndarrays in the same HDF5 file."""
+  def __init__(self, fn, array_key='ndarray_data', dataframe_key='dataframe_data', mode='r', use_dask=True, build_references=True, use_mock_references=True):
+    self.fn = fn
+    self.dataframe = self._load_dataframe(self.fn, dataframe_key=dataframe_key)
+    self._hdf_file, self.data = self._load_hdf_arrays(self.fn, mode=mode, array_key=array_key)
+    if use_dask:
+      array_data_dict = {}
+      print('Parsing ndarrays into dask.arrays:')
+      for k in h5Tools.h5_filtered_walk(self.data):
+        k = k.replace(array_key, '').replace('/', '')
+        print('\t', k)
+        try:
+          array_data_dict[k] = da.from_array(self.data[k], chunks=(100, *self.data[k].shape[1:]))
+        except ValueError as e:
+          array_data_dict[k] = da.from_array(self.data[k], chunks=(100,))
+      self.data = array_data_dict
+    self.use_dask = use_dask
+    self.build_references = build_references
+    self.use_mock_references = use_mock_references
+
+    # Feb 28, 2019
+    if self.build_references:
+      if use_mock_references:
+        self.rebuild_references()
+      elif use_dask:
+        self.rebuild_references()
+      else:
+        raise NotImplementedError('unsupported mode for build_references: must set `use_dask`=True or `use_mock_references`=True')
+
+    # self.dataframe.iloc = _wrappedComputeIndexer(self.dataframe.iloc)
+    # self.dataframe.loc = _wrappedComputeIndexer(self.dataframe.loc)
+
+    self._check_representation_invariant()
+
+  def __len__(self):
+    return len(self.dataframe)
+
+  def __getattr__(self, name):
+    try:
+      attr = getattr(self.dataframe, name)
+    except Exception as e:
+      try:
+        attr = getattr(self.data, name)
+      except Exception as e:
+        raise e
+    return attr
+
+  def __getitem__(self, key):
+    self._check_representation_invariant()
+    data_source = self._get_data_source(key)
+    return data_source[key]
+
+  def __setitem__(self, key, value):
+    try:
+      self.dataframe[key] = value
+    except Exception as e:
+      self.data.create_dataset(key, data=value)
+    self._check_representation_invariant()
+
+  def __iter__(self):
+    self._check_representation_invariant()
+    return self._iter_helper().__iter__()
+
+  def _iter_helper(self):
+    return [*list(self.dataframe), *list(self.data)]
+
+  def keys(self):
+    self._check_representation_invariant()
+    return list(self.__iter__())
+
+  def values(self):
+    self._check_representation_invariant()
+    return [*self.dataframe.values(), *self.data.values()]
+
+  def items(self):
+    self._check_representation_invariant()
+    return [*self.dataframe.items(), *self.data.items()]
+
+  def has_key(self, key):
+    self._check_representation_invariant()
+    return key in self
+
+  def rebuild_references(self):
+    self.build_references = True
+    self._populate_dataframe_with_ndarray_data_references()
+    self._check_representation_invariant()
+
+  def _populate_dataframe_with_ndarray_data_references(self):
+    mock_str = 'mock ' if self.use_mock_references else ''
+
+    print('Populating dataframes with %sreferences to on-disk datasets:' % mock_str)
+    ### <populate dataframe subsets with references to on-disk datasets, if requested>
+    for i, dset in enumerate(self.data):
+      print('\t%slinking --> %s' % (mock_str, dset))
+      if self.use_mock_references:
+        dset_refs = self.dataframe.index.map(lambda x: mock_lookup(x, self.data[dset]))
+      else:
+        # I think the DataFrameHDF objects need to be loaded with dask, or otherwise have the lookup wrapped so it won't evaluate immediately
+        dset_refs = self.dataframe.index.map(lambda x: self.data[dset][x])
+      self.dataframe[dset] = dset_refs
+    ### </populate dataframe subsets with references to on-disk datasets, if requested>
+
+  def _check_representation_invariant(self):
+    out = True
+    out = self._verify_unique_keys() and out
+
+    if not out:
+      raise ValueError('_check_representation_invariant is violated ')
+
+    return out
+
+  def _verify_unique_keys(self):
+    # keys must be unique
+    out = True
+    if not self.build_references:
+      if len(set(self._iter_helper())) != len(self._iter_helper()):
+        out = False
+        raise KeyError('keys must be unique if not building_references:')
+    return out
+
+  def _get_data_source(self, key):
+    self._check_representation_invariant()
+
+    if key in self.dataframe:
+      out = self.dataframe
+    elif key in self.data:
+      out = self.data
+    else:
+      raise KeyError('key not found: %s' % key)
+
+    return out
+
+  def _load_dataframe(self, fn, **kwargs):
+    return pd.read_hdf(fn, **kwargs)
+
+  def _load_hdf_arrays(self, fn, mode='r', array_key=None, n_attempts=60):
+    for i in range(n_attempts):
+      try:
+        h5_file = h5py.File(fn, mode=mode)
+        h5_group = h5_file['/'] if array_key is None else h5_file[array_key]
+        return h5_file, h5_group
+      except Exception as e:
+        print('DataFrameHDF HDF load failure %s/%s: %s' % (i + 1, n_attempts, e))
+        time.sleep(np.random.rand())
+
+  def masked_lookup(self, key, mask=None, dask_compute=False):
+    if isinstance(mask, pd.DataFrame):
+      _mask = mask.index
+      # return self[key][_mask] # breaks with non-decreasing HDF index
+      # return pd.Series({i: self[key][self.index.get_loc(i)] for i in _mask})  #TODO: reset index before writing source BigDataFrame !!! This probably doesn't work on if dataframe is a sample or head!!!
+      if dask_compute:
+        return pd.Series({i: self[key][i].compute() for i in _mask}) #TODO: does dask handle this automatically?
+      else:
+        return pd.Series({i: self[key][i] for i in _mask}) #TODO: does dask handle this automatically?
+    else:
+      return self[key][mask]
+
+  def close(self):
+    return self._hdf_file.close()
+
+  def to_pdh5(self, wfn, array_mask=None, reset_index=True):
+    if self.build_references:
+      return self._to_dataframehdf_from_built_references(self, wfn)
+    else:
+      return self.to_dataframehdf_HACK(wfn, self.data, self.dataframe, array_mask=array_mask, reset_index=reset_index)
+
+  def to_pdhdf(self, wfn, array_mask=None, reset_index=True):
+    if self.build_references:
+      self._to_dataframehdf_from_built_references(self, wfn)
+    else:
+      return self.to_dataframehdf_HACK(wfn, self.data, self.dataframe, array_mask=array_mask, reset_index=reset_index)
+
+  @staticmethod
+  def _to_dataframehdf_from_built_references(pdf, wfn, reset_index=True, n_jobs=3, parallel_backend='joblib'):
+    if not isinstance(pdf, DataFrameHDF) and not isinstance(pdf, pd.DataFrame):
+      ipdb.set_trace()
+      raise ValueError('pdf input must be a DataFrameHDF or DataFrame')
+
+    ndarray_columns = [x for x in pdf.data]
+
+    # ### <write /ndarray_data>
+    # print('writing pdf to hdf5: /ndarray_data:')
+    # with tables.open_file(wfn, mode='w') as h5wf:
+    #   for dset in ndarray_columns:
+    #     print("\twriting '/%s':" % dset)
+    #     temp_data = pdf[dset].iloc[0]()  #HACK
+    #     data_storage = h5wf.create_vlarray('/ndarray_data', dset, tables.Atom.from_dtype(temp_data[0].dtype), createparents=True)
+
+    #     for i, (row_ind, row) in enumerate(pdf.iterrows()):
+    #       utilfx.print_replace('\t\t%s/%s' % (i + 1, len(pdf)))
+    #       arr_val = row[dset]()
+    #       data_storage.append(arr_val)
+    # ### <write /ndarray_data>
+
+    # ### <write /dataframe_data>
+    # print('\nwriting pdf to hdf5: /dataframe_data:')
+    # df_only = pdf.drop(columns=ndarray_columns)
+    # print('\tNot writing columns: ', set(pdf.columns) - set(df_only.columns))
+    # if reset_index:
+    #   df_only['_pre_to_pdh5_index'] = df_only.index
+    #   df_only.reset_index(inplace=True, drop=True)
+    # utilfx.wrapped_write(df_only.to_hdf)(wfn, '/dataframe_data', format='f',  mode='a')
+    # ### </write /dataframe_data>
+
+    def _write_pdh5_chunk(df, wfn, data_rfn=None, data_columns=None, recipe_limit_to_slice=None, reset_index=True, wfn_stem=None):
+    # def _write_pdh5_chunk(pdf_subset, wfn, wfn_stem=None):
+      wfn_stem = '' if wfn_stem is None else wfn_stem
+      wfn += '.SUBSET_%s' % wfn_stem
+
+      # print(data_rfn)
+      pdf_subset = DataFrameHDF(data_rfn, use_dask=False, build_references=False, use_mock_references=True)
+      pdf_subset.dataframe = df
+      # data_store = h5py.File(data_rfn, 'r')
+      if data_columns is not None:
+        raise NotImplementedError()
+      pdf_subset.rebuild_references()
+
+      with tables.open_file(wfn, mode='w') as h5wf:
+        print('writing pdf_subset to hdf5: /ndarray_data:')
+        for dset in ndarray_columns:
+          print("\twriting '/%s':" % dset)
+          temp_data = pdf_subset[dset].iloc[0]()  #HACK
+          data_storage = h5wf.create_vlarray('/ndarray_data', dset, tables.Atom.from_dtype(temp_data[0].dtype), createparents=True)
+
+          for i, (row_ind, row) in enumerate(pdf_subset.iterrows()):
+            utilfx.print_replace('\t\t%s/%s' % (i + 1, len(pdf_subset)))
+            arr_val = row[dset]()
+            data_storage.append(arr_val)
+
+        print('\nwriting pdf_subset to hdf5: /dataframe_data:')
+        df_only = pdf_subset.drop(columns=ndarray_columns)
+        print('\tNot writing columns: ', set(pdf_subset.columns) - set(df_only.columns))
+        # reset_index = True  # this should always be set to True in this case # not in parallel context
+        if reset_index:
+          df_only['_pre_split_index'] = df_only.index
+          df_only.reset_index(inplace=True, drop=True)
+        utilfx.wrapped_write(df_only.to_hdf)(wfn, '/dataframe_data', format='f',  mode='a')
+
+      pdf_subset.close()
+
+    # grouped_inds = list(utilfx.grouper(pdf.index, n_groups=n_jobs))
+    # print(len(grouped_inds))
+    # ipdb.set_trace()
+    # Parallel(n_jobs=n_jobs)(delayed(_write_pdh5_chunk)(pdf.loc[loc_inds], wfn, wfn_stem='%s_' % i) for i, loc_inds in enumerate(grouped_inds))
+
+    chunk_size = int(np.ceil(pdf.shape[0] / n_jobs))
+    num_remaining = pdf.shape[0]
+    chunk_start_ind, chunk_end_ind = 0, 0
+    slice_inds_list = []
+    while num_remaining > 0:
+      print('n_stim to generate: %s' % num_remaining, flush=True)
+      temp_chunk_size = num_remaining if num_remaining < chunk_size else chunk_size
+      chunk_end_ind += temp_chunk_size
+      slice_inds_list.append([chunk_start_ind, chunk_end_ind])
+      chunk_start_ind = chunk_end_ind
+      num_remaining -= temp_chunk_size
+
+    df_for_worker = pdf.dataframe.drop(columns=[x for x in pdf.data])
+    ipdb.set_trace()
+    Parallel(n_jobs=n_jobs)(delayed(_write_pdh5_chunk)(df_for_worker.iloc[slice(*loc_inds)], wfn, data_rfn=pdf._hdf_file.filename, data_columns=None, reset_index=True, wfn_stem='%s' % i) for i, loc_inds in enumerate(slice_inds_list))
+    return wfn
+
+  @staticmethod
+  def to_dataframehdf_HACK(wfn, array_data, dataframe_data, array_mask=None, reset_index=True):
+    # write hdf5 array data
+    print('HACK writing ndarray data to hdf5')
+    if array_data is None:
+      with h5py.File(wfn, 'w') as h5wf:
+        h5wf.create_group('/ndarray_data')
+    else:
+      try:
+        with ProgressBar():
+          if array_mask is None:
+            utilfx.wrapped_write(da.to_hdf5)(wfn, {os.path.join('/ndarray_data', k): array_data[k] for k in array_data})
+          else:
+            utilfx.wrapped_write(da.to_hdf5)(wfn, {os.path.join('/ndarray_data', k): array_data[k][array_mask] for k in array_data})
+      except Exception as e:
+        raise e
+
+    # write dataframe data
+    print('\nwriting dataframe data to hdf5')
+    if reset_index:
+      dataframe_data['_pre_split_index'] = dataframe_data.index
+      dataframe_data.reset_index(inplace=True, drop=True)
+    utilfx.wrapped_write(dataframe_data.to_hdf)(wfn, '/dataframe_data', format='f',  mode='a')
+
+
+def mock_lookup(key, data_store=None):
+  def fx(dict_like=None):
+    dict_like = data_store if dict_like is None else dict_like
+    out = dict_like[key]
+    if isinstance(out, da.core.Array):
+      out = out.compute()
+    return out
+  return fx
 
 
 def encode_labels_to_ints(df, keys_to_encode_to_int, append=True, verbose=1):
@@ -33,7 +333,7 @@ def encode_labels_to_ints(df, keys_to_encode_to_int, append=True, verbose=1):
   return label_encoders
 
 
-def append_null_class_to_df(df_fn, columns=['corpus', 'path', 'source'], null_class_str='__nullClass__', wfn=True, append_ndarray_data=True, **kwargs):
+def append_null_class_to_df(df_fn, columns=['corpus', 'path', 'source'], null_class_str='__nullClass__', wfn=True, append_ndarray_data=True, df_null_row=None, **kwargs):
   AUDIOSET_HACK = kwargs.pop('audioset_hack', False)
 
   if df_fn.endswith('h5') or df_fn.endswith('hdf5'):
@@ -46,17 +346,22 @@ def append_null_class_to_df(df_fn, columns=['corpus', 'path', 'source'], null_cl
 
   columns = utilfx.make_iterable(columns)
 
-  if null_class_str not in np.unique(df[columns[0]]):
+  if null_class_str not in np.unique(df[columns[0]]) or df_null_row is not None:
     print('Appending nullClass: %s to dataframe: %s' % (null_class_str, df_fn))
-    null_class_columns = {k: null_class_str for k in columns}
+    if df_null_row is None:
+      null_class_columns = {k: null_class_str for k in columns}
 
-    if AUDIOSET_HACK:
-      null_class_columns.update({})
-
-    df = df.append(pd.DataFrame({
+      df_null_row = pd.DataFrame({
                                   **null_class_columns,
-                                 'sr': df.iloc[0]['sr']  #TODO: fix this hack
-                                }, index=[df.iloc[-1].name+1]), ignore_index=False, sort=True)
+                                 'sr': df.iloc[0]['sr'],  #TODO: fix this hack
+                                 }, index=[df.iloc[-1].name+1])
+
+      if AUDIOSET_HACK:
+        null_class_columns.update({})
+    else:
+      df_null_row = pd.DataFrame(df_null_row.values, index=[df.iloc[-1].name+1])
+
+    df = df.append(df_null_row, ignore_index=False, sort=True)
 
     if wfn:
       print('writing nullClass metadata')
@@ -219,176 +524,6 @@ def add_weights_to_dataframe(df, column, corpus_weights=None, verbose=1):
   #   df = bdf
 
   return df, weights_column
-
-
-class DataFrameHDF(object):
-  """Data structure to maninpulate/store metadata as pandas DataFrames
-  and data arrays as ndarrays in the same HDF5 file."""
-  def __init__(self, fn, array_key='ndarray_data', dataframe_key='dataframe_data', mode='r', use_dask=True, dask_auto_compute=True):
-    self.fn = fn
-    self.dataframe = self._load_dataframe(self.fn, dataframe_key=dataframe_key)
-    self._hdf_file, self.data = self._load_hdf_arrays(self.fn, mode=mode, array_key=array_key)
-    if use_dask:
-      array_data_dict = {}
-      print('parsing ndarrays into dask.arrays:')
-      for k in h5Tools.h5_filtered_walk(self.data):
-        k = k.replace(array_key, '').replace('/', '')
-        print('\t', k)
-        # array_data_dict[k] = da.from_array(self.data[k], chunks=(100, 2240))
-        # array_data_dict[k] = da.from_array(self.data[k], chunks=(100,)) # pre Jan 17, 2019
-        try:
-          array_data_dict[k] = da.from_array(self.data[k], chunks=(100, *self.data[k].shape[1:]))
-        except ValueError as e:
-          array_data_dict[k] = da.from_array(self.data[k], chunks=(100,))
-      self.data = array_data_dict
-    self.use_dask = use_dask
-    self.dask_auto_compute = dask_auto_compute
-    self._check_representation_invariant()
-
-  def __len__(self):
-    return len(self.dataframe )
-
-  def __getattr__(self, name):
-    try:
-      attr = getattr(self.dataframe, name)
-    except Exception as e:
-      try:
-        attr = getattr(self.data, name)
-      except Exception as e:
-        raise e
-    return attr
-
-  def __getitem__(self, key):
-    # try:
-    #   for k in key:
-    #     self._check_representation_invariant()
-    #     data_source[k] = self._get_data_source(k)
-    #   return data_source[k]
-    # except Exception as e:
-    #   self._check_representation_invariant()
-    #   data_source = self._get_data_source(key)
-    #   return data_source[key]
-    self._check_representation_invariant()
-    data_source = self._get_data_source(key)
-    return data_source[key]
-
-  def __setitem__(self, key, value):
-    try:
-      self.dataframe[key] = value
-    except Exception as e:
-      self.data.create_dataset(key, data=value)
-    self._check_representation_invariant()
-
-  def __iter__(self):
-    self._check_representation_invariant()
-    return self._iter_helper().__iter__()
-
-  def _iter_helper(self):
-    return [*list(self.dataframe), *list(self.data)]
-
-  def keys(self):
-    self._check_representation_invariant()
-    return list(self.__iter__())
-
-  def values(self):
-    self._check_representation_invariant()
-    return [*self.dataframe.values(), *self.data.values()]
-
-  def items(self):
-    self._check_representation_invariant()
-    return [*self.dataframe.items(), *self.data.items()]
-
-  def has_key(self, key):
-    self._check_representation_invariant()
-    return key in self
-
-  def _check_representation_invariant(self):
-    out = True
-    out = self._verify_unique_keys() and out
-
-    if not out:
-      raise ValueError('_check_representation_invariant is violated ')
-
-    return out
-
-  def _verify_unique_keys(self):
-    # keys must be unique
-    out = True
-    if len(set(self._iter_helper())) != len(self._iter_helper()):
-      out = False
-      raise KeyError('keys must be unique:')
-    return out
-
-  def _get_data_source(self, key):
-    # keys must be unique
-    # if key in self.dataframe and key in self.data:
-    #   raise KeyError('keys must be unique: %s' % key)
-    self._check_representation_invariant()
-
-    if key in self.dataframe:
-      out = self.dataframe
-    elif key in self.data:
-      out = self.data
-    else:
-      raise KeyError('key not found: %s' % key)
-
-    return out
-
-  def _load_dataframe(self, fn, **kwargs):
-    return pd.read_hdf(fn, **kwargs)
-
-  def _load_hdf_arrays(self, fn, mode='r', array_key=None, n_attempts=60):
-    for i in range(n_attempts):
-      try:
-        h5_file = h5py.File(fn, mode=mode)
-        h5_group = h5_file['/'] if array_key is None else h5_file[array_key]
-        return h5_file, h5_group
-      except Exception as e:
-        print('DataFrameHDF HDF load failure %s/%s: %s' % (i + 1, n_attempts, e))
-        time.sleep(np.random.rand())
-
-
-  def masked_lookup(self, key, mask=None, dask_compute=False):
-    if isinstance(mask, pd.DataFrame):
-      _mask = mask.index
-      # return self[key][_mask] # breaks with non-decreasing HDF index
-      # return pd.Series({i: self[key][self.index.get_loc(i)] for i in _mask})  #TODO: reset index before writing source BigDataFrame !!! This probably doesn't work on if dataframe is a sample or head!!!
-      if dask_compute:
-        return pd.Series({i: self[key][i].compute() for i in _mask}) #TODO: does dask handle this automatically?
-      else:
-        return pd.Series({i: self[key][i] for i in _mask}) #TODO: does dask handle this automatically?
-    else:
-      return self[key][mask]
-
-  def close(self):
-    return self._hdf_file.close()
-
-  def to_pdhdf(self, wfn, array_mask=None, reset_index=True):
-    return self.to_dataframehdf_HACK(wfn, self.data, self.dataframe, array_mask=array_mask, reset_index=reset_index)
-
-  @staticmethod
-  def to_dataframehdf_HACK(wfn, array_data, dataframe_data, array_mask=None, reset_index=True):
-    # write hdf5 array data
-    print('writing ndarray data to hdf5')
-    if array_data is None:
-      with h5py.File(wfn, 'w') as h5wf:
-        h5wf.create_group('/ndarray_data')
-    else:
-      try:
-        with ProgressBar():
-          if array_mask is None:
-            utilfx.wrapped_write(da.to_hdf5)(wfn, {os.path.join('/ndarray_data', k): array_data[k] for k in array_data})
-          else:
-            utilfx.wrapped_write(da.to_hdf5)(wfn, {os.path.join('/ndarray_data', k): array_data[k][array_mask] for k in array_data})
-      except Exception as e:
-        raise e
-
-    # write dataframe data
-    print('\nwriting dataframe data to hdf5')
-    if reset_index:
-      dataframe_data['_pre_split_index'] = dataframe_data.index
-      dataframe_data.reset_index(inplace=True, drop=True)
-    utilfx.wrapped_write(dataframe_data.to_hdf)(wfn, '/dataframe_data', format='f',  mode='a')
 
 
 def convert_dataframe_pickle_to_dataframehdf(df, ndarray_columns=None, wfn=None, resample=None, guess_ndarray_names=True, hdf_backend_mode='vlarray'):
@@ -630,11 +765,30 @@ def map_dataframehdf(pdf_fn, fx, wfn=None, columns='all', reset_index=True, pre_
   return wfn
 
 
+#################################
+###---------- TESTS ----------###
+#################################
+def run_tests():
+  rfn = '/om/user/raygon/projects/public/jsinDataset/assets/data/processed/v2Balanced/sr_20000/splits/train_stackedDataframeHDF_n187_IAFKQ5FUCCT4CGGK3OJ3EFAYF6QMC752.pdh5'
+  pdf = DataFrameHDF(rfn, use_dask=True, build_references=True, use_mock_references=True)
+
+  pdf.dataframe = pdf.dataframe.iloc[0:100:2]
+
+  wfn = pdf.to_pdh5('test.pdh5')
+
+  pdf_new = DataFrameHDF(wfn)
+
+  ipdb.set_trace()
+
+### <Mar 14, 2019: use_mock_references speed test>
+# df_signal = dataTools.DataFrameHDF(params['/config/sources/signal_sourceDataframePath'], use_dask=True, build_references=True, use_mock_references=True)
+# df_signal = dataTools.DataFrameHDF(params['/config/sources/signal_sourceDataframePath'], use_dask=True, build_references=True, use_mock_references=False)
+# ipdb.set_trace()
+### <Mar 14, 2019: use_mock_references speed test>
+
 if __name__ == '__main__':
   fire.Fire({
               'encode_labels_to_ints': encode_labels_to_ints,
               'stack_dataframehdf': stack_dataframehdf,
+              'run_tests': run_tests,
             })
-
-
-
