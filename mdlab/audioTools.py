@@ -7,6 +7,10 @@ from scipy.io import wavfile, loadmat
 import scipy.signal
 import warnings
 import time
+import glob
+from scipy.io.wavfile import read 
+from scipy.io.wavfile import write 
+from os.path import basename
 try:
   import pyaudio
 except:
@@ -546,6 +550,99 @@ def dir_convert_sphere_to_wav(path, out_dir=True, fx_filter=None, dry=False):
   for fn in fntp:
     out_fn = os.path.join(out_dir, os.path.basename(os.path.splitext(fn)[0] + '.wav'))
     sphere_to_wav(fn, out_fn=out_fn, dry=dry)
+
+
+
+def make_random_phase_spectrogram(mu,sigma,shape):
+    '''
+    Makes spectrogram with randomized phases by:
+        1. Drawing a waveform with `shape` smaples from a gaussian distribution.
+        2. Taking the FFT of that wavefrom to get its spectrogram.
+        3. Normalizing each sample in the spectrogram by its complex magnitude.
+        4. Taking the real component of the IFFT of the normalized
+        spectrogram.
+
+    Parameters:
+        Mu (int) : Mean of gaussian distribution samples are drawn from.
+        Sigma (int): Standard devidation of gaussian distribution samples are
+            drawn from.
+        Shape (int) : length of the wavefrom to be sampled
+    
+    Returns:
+        Spectrogram (ndarray) : Spectrogram containing randomized phases
+
+    '''
+    white_noise = np.random.normal(mu,sigma,shape)
+    wnoise_fft = np.fft.fft(white_noise,shape)
+    wnoise_amplitude = np.absolute(wnoise_fft)
+    wnoise_phases = np.divide(wnoise_fft,wnoise_amplitude)
+
+    return wnoise_phases
+
+
+def randomize_waveform_phases(target_waveform):
+    '''
+    Makes waveform with random phases that mathces the average spectra
+    of the target waveform.
+    
+    Parameters:
+        Target_waveform (ndarray): 1xN array containing the waveform which will
+        have it's pahse randomized
+
+    Returns:
+        target_waveform_rand_phase: Target wavefrom with randomized phases
+    '''
+
+    pdb.set_trace()
+    target_spectrum = np.fft.fft(target_waveform,target_waveform.shape[-1]*2)
+    wnoise_phases = \
+        make_random_phase_spectrogram(0,1,target_waveform.shape[-1]*2)
+    target_spectrogram_rand_phase = np.multiply(target_spectrum,wnoise_phases)
+    target_waveform_rand_phase_padded = \
+        np.fft.ifft(target_spectrogram_rand_phase).real
+    halfway_idx = round(target_waveform_rand_phase_padded.shape[0]/2)
+    target_waveform_rand_phase = \
+        target_waveform_rand_phase_padded[:halfway_idx]
+    return target_waveform_rand_phase
+
+
+def make_speech_shaped_noise(target_folder_regex,output_dir):
+    '''
+    Takes `target_directory_regex` regular expression and creates speech shaped noise
+    for all .wav files in that directory. The new wav files are placed in
+    `output_dir`.
+
+    Parameters:
+        target_directory_regex (string) : Regular expression specifying which
+        files to use as templates for shaped noise genration.
+
+        output_dir (string) : Location to save shaped noise. If the location
+        does not exist, the folder will be created.
+
+    Returns:
+        None
+
+    Raises:
+        UserWarning: Warns user if provided audio file has more than one
+        channel. 
+
+
+    '''
+
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    fnames = glob.glob(target_folder_regex)
+    for fname in fnames:
+        sr, waveform = read(fname)
+        if len(waveform.shape) > 1:
+            warnings.warn("More than one audio channel in {}. Using first channel only.".format(fname))
+            waveform = waveform[:,0]
+        fname_base = basename(fname)
+        ss_noise = randomize_waveform_phases(waveform)
+        ss_noise = ss_noise.astype(np.int16)
+        write_string = output_dir + '/' + fname_base.split('.')[0] + "_speechShapedNoise.wav"
+        write(write_string, sr, ss_noise)
 
 
 ###---------- MAINS ----------###
