@@ -25,7 +25,9 @@ class DataFrameHDF(object):
   def __init__(self, fn, array_key='ndarray_data', dataframe_key='dataframe_data', mode='r', use_dask=True, build_references=True, use_mock_references=True):
     self.fn = fn
     self.dataframe = self._load_dataframe(self.fn, dataframe_key=dataframe_key)
+    print('done loading dataframe', self.dataframe.shape)
     self._hdf_file, self.data = self._load_hdf_arrays(self.fn, mode=mode, array_key=array_key)
+    print('done loading hdf', self.dataframe.shape)
     if use_dask:
       array_data_dict = {}
       print('Parsing ndarrays into dask.arrays:')
@@ -194,94 +196,95 @@ class DataFrameHDF(object):
       return self.to_dataframehdf_HACK(wfn, self.data, self.dataframe, array_mask=array_mask, reset_index=reset_index)
 
   @staticmethod
-  def _to_dataframehdf_from_built_references(pdf, wfn, reset_index=True, n_jobs=3, parallel_backend='joblib'):
+  def _to_dataframehdf_from_built_references(pdf, wfn, reset_index=True, n_jobs=1, parallel_backend='joblib'):
     if not isinstance(pdf, DataFrameHDF) and not isinstance(pdf, pd.DataFrame):
       ipdb.set_trace()
       raise ValueError('pdf input must be a DataFrameHDF or DataFrame')
 
     ndarray_columns = [x for x in pdf.data]
 
-    # ### <write /ndarray_data>
-    # print('writing pdf to hdf5: /ndarray_data:')
-    # with tables.open_file(wfn, mode='w') as h5wf:
-    #   for dset in ndarray_columns:
-    #     print("\twriting '/%s':" % dset)
-    #     temp_data = pdf[dset].iloc[0]()  #HACK
-    #     data_storage = h5wf.create_vlarray('/ndarray_data', dset, tables.Atom.from_dtype(temp_data[0].dtype), createparents=True)
+    ### <write /ndarray_data>
+    print('writing pdf to hdf5: /ndarray_data:')
+    with tables.open_file(wfn, mode='w') as h5wf:
+      for dset in ndarray_columns:
+        print("\twriting '/%s':" % dset)
+        temp_data = pdf[dset].iloc[0]()  #HACK
+        data_storage = h5wf.create_vlarray('/ndarray_data', dset, tables.Atom.from_dtype(temp_data[0].dtype), createparents=True)
 
-    #     for i, (row_ind, row) in enumerate(pdf.iterrows()):
-    #       utilfx.print_replace('\t\t%s/%s' % (i + 1, len(pdf)))
-    #       arr_val = row[dset]()
-    #       data_storage.append(arr_val)
-    # ### <write /ndarray_data>
+        for i, (row_ind, row) in enumerate(pdf.iterrows()):
+          utilfx.print_replace('\t\t%s/%s' % (i + 1, len(pdf)))
+          arr_val = row[dset]()
+          data_storage.append(arr_val)
+    ### <write /ndarray_data>
 
-    # ### <write /dataframe_data>
-    # print('\nwriting pdf to hdf5: /dataframe_data:')
-    # df_only = pdf.drop(columns=ndarray_columns)
-    # print('\tNot writing columns: ', set(pdf.columns) - set(df_only.columns))
-    # if reset_index:
-    #   df_only['_pre_to_pdh5_index'] = df_only.index
-    #   df_only.reset_index(inplace=True, drop=True)
-    # utilfx.wrapped_write(df_only.to_hdf)(wfn, '/dataframe_data', format='f',  mode='a')
-    # ### </write /dataframe_data>
-
-    def _write_pdh5_chunk(df, wfn, data_rfn=None, data_columns=None, recipe_limit_to_slice=None, reset_index=True, wfn_stem=None):
-    # def _write_pdh5_chunk(pdf_subset, wfn, wfn_stem=None):
-      wfn_stem = '' if wfn_stem is None else wfn_stem
-      wfn += '.SUBSET_%s' % wfn_stem
-
-      # print(data_rfn)
-      pdf_subset = DataFrameHDF(data_rfn, use_dask=False, build_references=False, use_mock_references=True)
-      pdf_subset.dataframe = df
-      # data_store = h5py.File(data_rfn, 'r')
-      if data_columns is not None:
-        raise NotImplementedError()
-      pdf_subset.rebuild_references()
-
-      with tables.open_file(wfn, mode='w') as h5wf:
-        print('writing pdf_subset to hdf5: /ndarray_data:')
-        for dset in ndarray_columns:
-          print("\twriting '/%s':" % dset)
-          temp_data = pdf_subset[dset].iloc[0]()  #HACK
-          data_storage = h5wf.create_vlarray('/ndarray_data', dset, tables.Atom.from_dtype(temp_data[0].dtype), createparents=True)
-
-          for i, (row_ind, row) in enumerate(pdf_subset.iterrows()):
-            utilfx.print_replace('\t\t%s/%s' % (i + 1, len(pdf_subset)))
-            arr_val = row[dset]()
-            data_storage.append(arr_val)
-
-        print('\nwriting pdf_subset to hdf5: /dataframe_data:')
-        df_only = pdf_subset.drop(columns=ndarray_columns)
-        print('\tNot writing columns: ', set(pdf_subset.columns) - set(df_only.columns))
-        # reset_index = True  # this should always be set to True in this case # not in parallel context
-        if reset_index:
-          df_only['_pre_split_index'] = df_only.index
-          df_only.reset_index(inplace=True, drop=True)
-        utilfx.wrapped_write(df_only.to_hdf)(wfn, '/dataframe_data', format='f',  mode='a')
-
-      pdf_subset.close()
-
-    # grouped_inds = list(utilfx.grouper(pdf.index, n_groups=n_jobs))
-    # print(len(grouped_inds))
-    # ipdb.set_trace()
-    # Parallel(n_jobs=n_jobs)(delayed(_write_pdh5_chunk)(pdf.loc[loc_inds], wfn, wfn_stem='%s_' % i) for i, loc_inds in enumerate(grouped_inds))
-
-    chunk_size = int(np.ceil(pdf.shape[0] / n_jobs))
-    num_remaining = pdf.shape[0]
-    chunk_start_ind, chunk_end_ind = 0, 0
-    slice_inds_list = []
-    while num_remaining > 0:
-      print('n_stim to generate: %s' % num_remaining, flush=True)
-      temp_chunk_size = num_remaining if num_remaining < chunk_size else chunk_size
-      chunk_end_ind += temp_chunk_size
-      slice_inds_list.append([chunk_start_ind, chunk_end_ind])
-      chunk_start_ind = chunk_end_ind
-      num_remaining -= temp_chunk_size
-
-    df_for_worker = pdf.dataframe.drop(columns=[x for x in pdf.data])
-    ipdb.set_trace()
-    Parallel(n_jobs=n_jobs)(delayed(_write_pdh5_chunk)(df_for_worker.iloc[slice(*loc_inds)], wfn, data_rfn=pdf._hdf_file.filename, data_columns=None, reset_index=True, wfn_stem='%s' % i) for i, loc_inds in enumerate(slice_inds_list))
+    ### <write /dataframe_data>
+    print('\nwriting pdf to hdf5: /dataframe_data:')
+    df_only = pdf.drop(columns=ndarray_columns)
+    print('\tNot writing columns: ', set(pdf.columns) - set(df_only.columns))
+    if reset_index:
+      df_only['_pre_to_pdh5_index'] = df_only.index
+      df_only.reset_index(inplace=True, drop=True)
+    utilfx.wrapped_write(df_only.to_hdf)(wfn, '/dataframe_data', format='f',  mode='a')
+    ### </write /dataframe_data>
     return wfn
+
+    # def _write_pdh5_chunk(df, wfn, data_rfn=None, data_columns=None, recipe_limit_to_slice=None, reset_index=True, wfn_stem=None):
+    # # def _write_pdh5_chunk(pdf_subset, wfn, wfn_stem=None):
+    #   wfn_stem = '' if wfn_stem is None else wfn_stem
+    #   wfn += '.SUBSET_%s' % wfn_stem
+
+    #   # print(data_rfn)
+    #   pdf_subset = DataFrameHDF(data_rfn, use_dask=False, build_references=False, use_mock_references=True)
+    #   pdf_subset.dataframe = df
+    #   # data_store = h5py.File(data_rfn, 'r')
+    #   if data_columns is not None:
+    #     raise NotImplementedError()
+    #   pdf_subset.rebuild_references()
+
+    #   with tables.open_file(wfn, mode='w') as h5wf:
+    #     print('writing pdf_subset to hdf5: /ndarray_data:')
+    #     for dset in ndarray_columns:
+    #       print("\twriting '/%s':" % dset)
+    #       temp_data = pdf_subset[dset].iloc[0]()  #HACK
+    #       data_storage = h5wf.create_vlarray('/ndarray_data', dset, tables.Atom.from_dtype(temp_data[0].dtype), createparents=True)
+
+    #       for i, (row_ind, row) in enumerate(pdf_subset.iterrows()):
+    #         utilfx.print_replace('\t\t%s/%s' % (i + 1, len(pdf_subset)))
+    #         arr_val = row[dset]()
+    #         data_storage.append(arr_val)
+
+    #     print('\nwriting pdf_subset to hdf5: /dataframe_data:')
+    #     df_only = pdf_subset.drop(columns=ndarray_columns)
+    #     print('\tNot writing columns: ', set(pdf_subset.columns) - set(df_only.columns))
+    #     # reset_index = True  # this should always be set to True in this case # not in parallel context
+    #     if reset_index:
+    #       df_only['_pre_split_index'] = df_only.index
+    #       df_only.reset_index(inplace=True, drop=True)
+    #     utilfx.wrapped_write(df_only.to_hdf)(wfn, '/dataframe_data', format='f',  mode='a')
+
+    #   pdf_subset.close()
+
+    # # grouped_inds = list(utilfx.grouper(pdf.index, n_groups=n_jobs))
+    # # print(len(grouped_inds))
+    # # ipdb.set_trace()
+    # # Parallel(n_jobs=n_jobs)(delayed(_write_pdh5_chunk)(pdf.loc[loc_inds], wfn, wfn_stem='%s_' % i) for i, loc_inds in enumerate(grouped_inds))
+
+    # chunk_size = int(np.ceil(pdf.shape[0] / n_jobs))
+    # num_remaining = pdf.shape[0]
+    # chunk_start_ind, chunk_end_ind = 0, 0
+    # slice_inds_list = []
+    # while num_remaining > 0:
+    #   print('n_stim to generate: %s' % num_remaining, flush=True)
+    #   temp_chunk_size = num_remaining if num_remaining < chunk_size else chunk_size
+    #   chunk_end_ind += temp_chunk_size
+    #   slice_inds_list.append([chunk_start_ind, chunk_end_ind])
+    #   chunk_start_ind = chunk_end_ind
+    #   num_remaining -= temp_chunk_size
+
+    # df_for_worker = pdf.dataframe.drop(columns=[x for x in pdf.data])
+    # ipdb.set_trace()
+    # Parallel(n_jobs=n_jobs)(delayed(_write_pdh5_chunk)(df_for_worker.iloc[slice(*loc_inds)], wfn, data_rfn=pdf._hdf_file.filename, data_columns=None, reset_index=True, wfn_stem='%s' % i) for i, loc_inds in enumerate(slice_inds_list))
+    # return wfn
 
   @staticmethod
   def to_dataframehdf_HACK(wfn, array_data, dataframe_data, array_mask=None, reset_index=True):
