@@ -315,7 +315,7 @@ def make_iterable(x):
   return x_list
 
 
-def grouper(iterable, n_groups=1, chunk_size=None):
+def grouper(iterable, n_groups=None, chunk_size=None):
   """Group contents of iterable into groups of (at most) size n. If
   the iterable doesn't divide evenly into groups of size n, the last
   group will have fewer items.
@@ -348,8 +348,6 @@ def join_iter(iterable, delimiter='_', strict=False):
   else:
     out = delimiter.join(map(str, iterable))
     return out if out else None
-
-
 
 
 def format_time(t, format='%H:%M:%S'):
